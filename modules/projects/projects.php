@@ -2,29 +2,24 @@
 require_once '../../config/database.php';
 require_once '../../includes/auth.php';
 
-requireDepartment(['projects']);
+requireDepartment(['engineering']);
 
 $page_title = 'Projects';
 $action = $_GET['action'] ?? 'list';
 $id = (int)($_GET['id'] ?? 0);
 
-function generateProjectCode() {
-    global $pdo;
-    $year = date('Y');
-    try {
-        $stmt = $pdo->prepare("SELECT MAX(CAST(SUBSTRING(project_code, 9) AS UNSIGNED)) as last_num FROM projects WHERE project_code LIKE ?");
-        $stmt->execute(["PRJ-$year-%"]);
-        $result = $stmt->fetch();
-        $last_num = $result['last_num'] ?? 0;
-        $new_num = str_pad($last_num + 1, 3, '0', STR_PAD_LEFT);
-        return "PRJ-$year-$new_num";
-    } catch (PDOException $e) {
-        return "PRJ-" . date('Ymd') . "-001";
-    }
-}
-
 // Handle form submissions
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    if ((isset($_POST['add_project']) || isset($_POST['update_project'])) && !canSaveProjectRecord()) {
+        $_SESSION['error'] = 'You cannot save project records.';
+        header('Location: projects.php');
+        exit();
+    }
+    if (isset($_POST['add_project']) && !canEncodeApprovedProject()) {
+        $_SESSION['error'] = 'Only Executive Admin can encode an approved project.';
+        header('Location: projects.php');
+        exit();
+    }
     if (isset($_POST['add_project']) || isset($_POST['update_project'])) {
         $project_code = $_POST['project_code'] ?? generateProjectCode();
         $name = trim($_POST['name'] ?? '');
@@ -35,6 +30,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $end_date = $_POST['end_date'] ?? null;
         $status = $_POST['status'] ?? 'planning';
         $estimated_budget = (float)($_POST['estimated_budget'] ?? 0);
+        $assigned_to = (int)($_POST['assigned_to'] ?? 0) ?: null;
         
         $errors = [];
         if (empty($name)) $errors[] = 'Project name is required.';
@@ -43,16 +39,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if (empty($errors)) {
             try {
                 if (isset($_POST['add_project'])) {
-                    $stmt = $pdo->prepare("INSERT INTO projects (project_code, name, description, location, client, start_date, end_date, status, estimated_budget, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-                    $stmt->execute([$project_code, $name, $description, $location, $client, $start_date, $end_date, $status, $estimated_budget, $_SESSION['user_id']]);
+                    $stmt = $pdo->prepare("INSERT INTO projects (project_code, name, description, location, client, start_date, end_date, status, estimated_budget, created_by, assigned_to, in_charge_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+                    $stmt->execute([$project_code, $name, $description, $location, $client, $start_date, $end_date, $status, $estimated_budget, $_SESSION['user_id'], $assigned_to, $assigned_to]);
                     
                     logActivity($_SESSION['user_id'], 'Created project', 'Projects', "Project: $project_code");
                     $_SESSION['success'] = "Project created successfully!";
                     header('Location: projects.php');
                     exit();
                 } else {
-                    $stmt = $pdo->prepare("UPDATE projects SET name = ?, description = ?, location = ?, client = ?, start_date = ?, end_date = ?, status = ?, estimated_budget = ? WHERE id = ?");
-                    $stmt->execute([$name, $description, $location, $client, $start_date, $end_date, $status, $estimated_budget, $id]);
+                    $stmt = $pdo->prepare("UPDATE projects SET name = ?, description = ?, location = ?, client = ?, start_date = ?, end_date = ?, status = ?, estimated_budget = ?, assigned_to = ?, in_charge_id = ? WHERE id = ?");
+                    $stmt->execute([$name, $description, $location, $client, $start_date, $end_date, $status, $estimated_budget, $assigned_to, $assigned_to, $id]);
                     
                     logActivity($_SESSION['user_id'], 'Updated project', 'Projects', "Project: $project_code");
                     $_SESSION['success'] = "Project updated successfully!";
@@ -60,7 +56,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     exit();
                 }
             } catch (PDOException $e) {
-                $error = 'Database error: ' . $e->getMessage();
+                $error = userDatabaseError($e);
             }
         }
     }
@@ -68,6 +64,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 // Handle Delete
 if (isset($_GET['delete_id']) && $action === 'delete') {
+    if (!canDelete('projects')) {
+        $_SESSION['error'] = 'Administrators cannot delete project records.';
+        header('Location: projects.php');
+        exit();
+    }
     $delete_id = (int)$_GET['delete_id'];
     try {
         // Check if project has related records
@@ -85,23 +86,31 @@ if (isset($_GET['delete_id']) && $action === 'delete') {
         header('Location: projects.php');
         exit();
     } catch (PDOException $e) {
-        $error = 'Database error: ' . $e->getMessage();
+        $error = userDatabaseError($e);
     }
 }
 
 // Get projects - FIXED: Removed archived column reference
 $projects = [];
 try {
-    $query = "SELECT * FROM projects ORDER BY created_at DESC";
+    $query = "SELECT p.*, COALESCE(ua.full_name, ui.full_name) AS in_charge_name
+              FROM projects p
+              LEFT JOIN users ua ON p.assigned_to = ua.id
+              LEFT JOIN users ui ON p.in_charge_id = ui.id
+              ORDER BY p.created_at DESC";
     $projects = $pdo->query($query)->fetchAll();
 } catch (PDOException $e) {
-    $error = 'Database error: ' . $e->getMessage();
+    $error = userDatabaseError($e);
 }
 
 // Get single project
 $project_details = null;
 if ($action === 'edit' || $action === 'view') {
-    $stmt = $pdo->prepare("SELECT * FROM projects WHERE id = ?");
+    $stmt = $pdo->prepare("SELECT p.*, COALESCE(ua.full_name, ui.full_name) AS in_charge_name
+        FROM projects p
+        LEFT JOIN users ua ON p.assigned_to = ua.id
+        LEFT JOIN users ui ON p.in_charge_id = ui.id
+        WHERE p.id = ?");
     $stmt->execute([$id]);
     $project_details = $stmt->fetch();
     
@@ -111,6 +120,24 @@ if ($action === 'edit' || $action === 'view') {
     }
 }
 
+if ($action === 'add' && !canEncodeApprovedProject()) {
+    $_SESSION['error'] = 'Only Executive Admin can encode an approved project.';
+    header('Location: projects.php');
+    exit();
+}
+if ($action === 'edit' && !canSaveProjectRecord()) {
+    $_SESSION['error'] = 'You cannot edit this project.';
+    header('Location: projects.php' . ($id ? '?action=view&id=' . $id : ''));
+    exit();
+}
+
+$engineering_users = [];
+try {
+    $engineering_users = $pdo->query("SELECT id, full_name FROM users WHERE department = 'engineering' AND status = 'active' ORDER BY full_name")->fetchAll();
+} catch (PDOException $e) {
+    $engineering_users = [];
+}
+
 include '../../includes/header.php';
 ?>
 
@@ -118,7 +145,9 @@ include '../../includes/header.php';
     <h1><i class="fas fa-building"></i> <?php echo $page_title; ?></h1>
     <?php if ($action === 'list'): ?>
         <div style="display:flex;gap:0.5rem;flex-wrap:wrap;">
-            <a href="?action=add" class="btn btn-primary"><i class="fas fa-plus"></i> New Project</a>
+            <?php if (canEncodeApprovedProject()): ?>
+            <a href="?action=add" class="btn btn-primary"><i class="fas fa-plus"></i> Encode Approved Project</a>
+            <?php endif; ?>
         </div>
     <?php endif; ?>
 </div>
@@ -136,7 +165,7 @@ include '../../includes/header.php';
 <?php if ($action === 'add' || $action === 'edit'): ?>
 <!-- Add/Edit Form -->
 <div class="card">
-    <h3><?php echo $action === 'add' ? 'Create New' : 'Edit'; ?> Project</h3>
+    <h3><?php echo $action === 'add' ? 'Encode Approved Project' : 'Update Project'; ?></h3>
     <form method="POST">
         <?php if ($action === 'edit'): ?>
             <input type="hidden" name="update_project" value="1">
@@ -167,6 +196,20 @@ include '../../includes/header.php';
             <div class="form-group">
                 <label>Client</label>
                 <input type="text" name="client" value="<?php echo htmlspecialchars($project_details['client'] ?? ''); ?>" placeholder="Client name">
+            </div>
+            <div class="form-group">
+                <label>Assigned To (Project In-Charge)</label>
+                <select name="assigned_to">
+                    <option value="">Unassigned</option>
+                    <?php
+                    $current_assigned = (int)($project_details['assigned_to'] ?? $project_details['in_charge_id'] ?? 0);
+                    foreach ($engineering_users as $eng):
+                    ?>
+                        <option value="<?php echo (int)$eng['id']; ?>" <?php echo $current_assigned === (int)$eng['id'] ? 'selected' : ''; ?>>
+                            <?php echo htmlspecialchars($eng['full_name']); ?>
+                        </option>
+                    <?php endforeach; ?>
+                </select>
             </div>
         </div>
         
@@ -218,6 +261,7 @@ include '../../includes/header.php';
         <div class="detail-row"><span>Name:</span> <?php echo htmlspecialchars($project_details['name']); ?></div>
         <div class="detail-row"><span>Location:</span> <?php echo htmlspecialchars($project_details['location'] ?? 'N/A'); ?></div>
         <div class="detail-row"><span>Client:</span> <?php echo htmlspecialchars($project_details['client'] ?? 'N/A'); ?></div>
+        <div class="detail-row"><span>Project In-Charge:</span> <?php echo htmlspecialchars($project_details['in_charge_name'] ?? 'Not assigned (Accounting)'); ?></div>
         <div class="detail-row"><span>Status:</span> <span class="badge badge-<?php echo $project_details['status']; ?>"><?php echo ucfirst($project_details['status']); ?></span></div>
         <div class="detail-row"><span>Start Date:</span> <?php echo $project_details['start_date'] ? date('M d, Y', strtotime($project_details['start_date'])) : 'N/A'; ?></div>
         <div class="detail-row"><span>End Date:</span> <?php echo $project_details['end_date'] ? date('M d, Y', strtotime($project_details['end_date'])) : 'N/A'; ?></div>
@@ -232,10 +276,14 @@ include '../../includes/header.php';
         <?php endif; ?>
     </div>
     <div style="margin-top:1.5rem; display:flex; gap:0.5rem; flex-wrap:wrap;">
+        <?php if (canWriteDepartmentData('projects')): ?>
         <a href="?action=edit&id=<?php echo $project_details['id']; ?>" class="btn btn-warning"><i class="fas fa-edit"></i> Edit</a>
+        <?php endif; ?>
         <a href="project_pdf.php?id=<?php echo (int)$project_details['id']; ?>" class="btn btn-outline"><i class="fas fa-download"></i> Download PDF</a>
         <a href="project_details.php?id=<?php echo $project_details['id']; ?>" class="btn btn-info"><i class="fas fa-chart-bar"></i> Full Details</a>
+        <?php if (canDelete('projects')): ?>
         <a href="?action=delete&delete_id=<?php echo $project_details['id']; ?>" class="btn btn-danger" onclick="return confirm('Are you sure you want to delete this project? This action cannot be undone.')"><i class="fas fa-trash"></i> Delete</a>
+        <?php endif; ?>
         <a href="projects.php" class="btn btn-secondary"><i class="fas fa-arrow-left"></i> Back</a>
     </div>
 </div>
@@ -256,33 +304,39 @@ include '../../includes/header.php';
                     <th onclick="sortTable('projectTable', 0)" style="cursor:pointer;">Code <i class="fas fa-sort"></i></th>
                     <th onclick="sortTable('projectTable', 1)" style="cursor:pointer;">Name <i class="fas fa-sort"></i></th>
                     <th onclick="sortTable('projectTable', 2)" style="cursor:pointer;">Location <i class="fas fa-sort"></i></th>
-                    <th onclick="sortTable('projectTable', 3)" style="cursor:pointer;">Status <i class="fas fa-sort"></i></th>
-                    <th onclick="sortTable('projectTable', 4)" style="cursor:pointer;">Budget <i class="fas fa-sort"></i></th>
+                    <th onclick="sortTable('projectTable', 3)" style="cursor:pointer;">In-Charge <i class="fas fa-sort"></i></th>
+                    <th onclick="sortTable('projectTable', 4)" style="cursor:pointer;">Status <i class="fas fa-sort"></i></th>
+                    <th onclick="sortTable('projectTable', 5)" style="cursor:pointer;">Budget <i class="fas fa-sort"></i></th>
                     <th>Actions</th>
                 </tr>
             </thead>
             <tbody>
                 <?php if (empty($projects)): ?>
                     <tr>
-                        <td colspan="6" style="text-align:center;color:#94a3b8;padding:2rem;">
+                        <td colspan="7" style="text-align:center;color:#94a3b8;padding:2rem;">
                             <i class="fas fa-building" style="font-size:2rem;display:block;margin-bottom:0.5rem;opacity:0.3;"></i>
-                            No projects found. Click "New Project" to create one.
+                            No projects encoded yet. Executive Admin encodes the approved project first.
                         </td>
                     </tr>
                 <?php else: ?>
                     <?php foreach ($projects as $project): ?>
                     <tr>
-                        <td><strong><?php echo htmlspecialchars($project['project_code']); ?></strong></td>
+                        <td><strong><?php echo htmlspecialchars(displayDocumentCode($project['project_code'])); ?></strong></td>
                         <td><?php echo htmlspecialchars($project['name']); ?></td>
                         <td><?php echo htmlspecialchars($project['location'] ?? 'N/A'); ?></td>
+                        <td><?php echo htmlspecialchars($project['in_charge_name'] ?? 'Unassigned'); ?></td>
                         <td><span class="badge badge-<?php echo $project['status']; ?>"><?php echo ucfirst($project['status']); ?></span></td>
                         <td>₱<?php echo number_format($project['estimated_budget'], 2); ?></td>
                         <td>
                             <div style="display:flex; gap:0.3rem; flex-wrap:wrap;">
                                 <a href="?action=view&id=<?php echo $project['id']; ?>" class="btn btn-sm btn-info" title="View"><i class="fas fa-eye"></i></a>
+                                <?php if (canSaveProjectRecord()): ?>
                                 <a href="?action=edit&id=<?php echo $project['id']; ?>" class="btn btn-sm btn-warning" title="Edit"><i class="fas fa-edit"></i></a>
+                                <?php endif; ?>
                                 <a href="project_details.php?id=<?php echo $project['id']; ?>" class="btn btn-sm btn-success" title="Details"><i class="fas fa-chart-bar"></i></a>
+                                <?php if (canDelete('projects')): ?>
                                 <a href="?action=delete&delete_id=<?php echo $project['id']; ?>" class="btn btn-sm btn-danger" title="Delete" onclick="return confirm('Delete this project?')"><i class="fas fa-trash"></i></a>
+                                <?php endif; ?>
                             </div>
                         </td>
                     </tr>

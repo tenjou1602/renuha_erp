@@ -2,10 +2,53 @@
 require_once '../../config/database.php';
 require_once '../../includes/auth.php';
 
-requireDepartment(['projects']);
+requireDepartment(['engineering']);
 
 $page_title = 'Project Details';
 $id = (int)($_GET['id'] ?? 0);
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_personnel'])) {
+    if (!canWriteDepartmentData('projects')) {
+        $_SESSION['error'] = 'Administrators have view-only access.';
+        header('Location: project_details.php?id=' . (int)($_POST['project_id'] ?? 0));
+        exit();
+    }
+    $pid = (int)($_POST['project_id'] ?? 0);
+    $name = trim($_POST['name'] ?? '');
+    $position = trim($_POST['position'] ?? '');
+    $department_name = trim($_POST['department'] ?? '');
+    if ($pid <= 0 || $name === '' || $position === '') {
+        $_SESSION['error'] = 'Name and position are required.';
+    } else {
+        try {
+            $stmt = $pdo->prepare("INSERT INTO personnel (project_id, name, position, department, status) VALUES (?, ?, ?, ?, 'active')");
+            $stmt->execute([$pid, $name, $position, $department_name !== '' ? $department_name : null]);
+            logActivity($_SESSION['user_id'], 'Assigned personnel', 'Projects', "$name on project $pid");
+            $_SESSION['success'] = 'Personnel assigned.';
+        } catch (PDOException $e) {
+            $_SESSION['error'] = userDatabaseError($e, 'Projects');
+        }
+    }
+    header('Location: project_details.php?id=' . $pid);
+    exit();
+}
+
+if (isset($_GET['remove_personnel'])) {
+    if (!canDelete('projects')) {
+        $_SESSION['error'] = 'You cannot remove personnel.';
+        header('Location: project_details.php?id=' . $id);
+        exit();
+    }
+    try {
+        $stmt = $pdo->prepare("DELETE FROM personnel WHERE id = ? AND project_id = ?");
+        $stmt->execute([(int)$_GET['remove_personnel'], $id]);
+        $_SESSION['success'] = 'Personnel removed.';
+    } catch (PDOException $e) {
+        $_SESSION['error'] = userDatabaseError($e, 'Projects');
+    }
+    header('Location: project_details.php?id=' . $id);
+    exit();
+}
 
 $project = null;
 $purchase_requests = [];
@@ -14,6 +57,9 @@ $expenses = [];
 $quotations = [];
 $personnel = [];
 $all_projects = [];
+$project_accomplishments = [];
+$project_attachments = [];
+$assigned_name = 'Unassigned';
 
 try {
     if ($id <= 0) {
@@ -27,6 +73,14 @@ try {
             $_SESSION['error'] = 'Project not found.';
             header('Location: project_details.php');
             exit();
+        }
+
+        $assigned_name = 'Unassigned';
+        $assigned_id = (int)($project['assigned_to'] ?? $project['in_charge_id'] ?? 0);
+        if ($assigned_id > 0) {
+            $an = $pdo->prepare("SELECT full_name FROM users WHERE id = ?");
+            $an->execute([$assigned_id]);
+            $assigned_name = $an->fetchColumn() ?: 'Unassigned';
         }
 
         $stmt = $pdo->prepare("
@@ -54,9 +108,25 @@ try {
         $p = $pdo->prepare("SELECT * FROM personnel WHERE project_id = ? ORDER BY created_at DESC");
         $p->execute([$id]);
         $personnel = $p->fetchAll();
+
+        try {
+            $a = $pdo->prepare("SELECT a.*, u.full_name AS created_by_name FROM accomplishments a LEFT JOIN users u ON a.created_by = u.id WHERE a.project_id = ? ORDER BY a.created_at DESC");
+            $a->execute([$id]);
+            $project_accomplishments = $a->fetchAll();
+        } catch (PDOException $e) {
+            $project_accomplishments = [];
+        }
+
+        try {
+            $att = $pdo->prepare("SELECT a.*, u.full_name AS uploaded_by_name FROM attachments a LEFT JOIN users u ON a.uploaded_by = u.id WHERE a.project_id = ? ORDER BY a.created_at DESC");
+            $att->execute([$id]);
+            $project_attachments = $att->fetchAll();
+        } catch (PDOException $e) {
+            $project_attachments = [];
+        }
     }
 } catch (PDOException $e) {
-    $error = 'Database error: ' . $e->getMessage();
+    $error = userDatabaseError($e);
 }
 
 include '../../includes/header.php';
@@ -82,6 +152,9 @@ include '../../includes/header.php';
 }
 </style>
 
+<?php if (isset($_SESSION['success'])): ?>
+    <div class="alert alert-success"><?php echo htmlspecialchars($_SESSION['success']); unset($_SESSION['success']); ?></div>
+<?php endif; ?>
 <?php if (isset($_SESSION['error'])): ?>
     <div class="alert alert-danger"><?php echo htmlspecialchars($_SESSION['error']); unset($_SESSION['error']); ?></div>
 <?php endif; ?>
@@ -136,7 +209,9 @@ include '../../includes/header.php';
 <div class="page-header">
     <h1><i class="fas fa-chart-bar"></i> Project Details</h1>
     <div class="button-row">
+        <?php if (canWriteDepartmentData('projects')): ?>
         <a href="projects.php?action=edit&id=<?php echo $project['id']; ?>" class="btn btn-warning"><i class="fas fa-edit"></i> Edit</a>
+        <?php endif; ?>
         <a href="project_pdf.php?id=<?php echo (int)$project['id']; ?>" class="btn btn-outline"><i class="fas fa-download"></i> Download PDF</a>
         <a href="project_details.php" class="btn btn-secondary"><i class="fas fa-arrow-left"></i> All Details</a>
         <a href="projects.php" class="btn btn-secondary"><i class="fas fa-list"></i> Projects</a>
@@ -162,6 +237,10 @@ include '../../includes/header.php';
         <div class="detail-item">
             <div class="label">Client</div>
             <div class="value"><?php echo htmlspecialchars($project['client'] ?? 'N/A'); ?></div>
+        </div>
+        <div class="detail-item">
+            <div class="label">Project In-Charge</div>
+            <div class="value"><?php echo htmlspecialchars($assigned_name ?? 'Unassigned'); ?></div>
         </div>
         <div class="detail-item">
             <div class="label">Location</div>
@@ -371,8 +450,26 @@ include '../../includes/header.php';
 <!-- Personnel -->
 <div class="card">
     <h3><i class="fas fa-users"></i> Personnel</h3>
+    <?php if (canWriteDepartmentData('projects')): ?>
+    <form method="POST" style="margin-bottom:1rem;">
+        <input type="hidden" name="project_id" value="<?php echo (int)$project['id']; ?>">
+        <div class="form-group">
+            <label>Name</label>
+            <input type="text" name="name" required>
+        </div>
+        <div class="form-group">
+            <label>Position</label>
+            <input type="text" name="position" required>
+        </div>
+        <div class="form-group">
+            <label>Department</label>
+            <input type="text" name="department">
+        </div>
+        <button type="submit" name="add_personnel" class="btn btn-primary">Assign</button>
+    </form>
+    <?php endif; ?>
     <?php if (empty($personnel ?? [])): ?>
-        <div class="empty-state">
+        <div class="empty-state compact">
             <i class="fas fa-users"></i>
             <p>No personnel assigned to this project.</p>
         </div>
@@ -385,6 +482,7 @@ include '../../includes/header.php';
                         <th>Position</th>
                         <th>Department</th>
                         <th>Status</th>
+                        <th></th>
                     </tr>
                 </thead>
                 <tbody>
@@ -394,6 +492,69 @@ include '../../includes/header.php';
                         <td><?php echo htmlspecialchars($emp['position']); ?></td>
                         <td><?php echo htmlspecialchars($emp['department'] ?? 'N/A'); ?></td>
                         <td><span class="badge badge-<?php echo strtolower($emp['status'] ?? 'active'); ?>"><?php echo ucfirst($emp['status'] ?? 'Active'); ?></span></td>
+                        <td>
+                            <?php if (canDelete('projects')): ?>
+                            <a href="project_details.php?id=<?php echo (int)$project['id']; ?>&remove_personnel=<?php echo (int)$emp['id']; ?>" class="btn btn-sm btn-danger" onclick="return confirm('Remove this person?');"><i class="fas fa-trash"></i></a>
+                            <?php endif; ?>
+                        </td>
+                    </tr>
+                    <?php endforeach; ?>
+                </tbody>
+            </table>
+        </div>
+    <?php endif; ?>
+</div>
+
+<div class="card">
+    <h3><i class="fas fa-clipboard-check"></i> Accomplishments</h3>
+    <p><a href="accomplishments.php" class="btn btn-sm btn-outline">Open accomplishments</a></p>
+    <?php if (empty($project_accomplishments)): ?>
+        <p class="muted-note">No accomplishments recorded for this project.</p>
+    <?php else: ?>
+        <div class="table-responsive">
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th>Date</th>
+                        <th>Description</th>
+                        <th>%</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <?php foreach ($project_accomplishments as $row): ?>
+                    <tr>
+                        <td><?php echo date('M d, Y', strtotime($row['created_at'])); ?></td>
+                        <td><?php echo htmlspecialchars($row['description']); ?></td>
+                        <td><?php echo number_format((float)$row['completion_percentage'], 1); ?>%</td>
+                    </tr>
+                    <?php endforeach; ?>
+                </tbody>
+            </table>
+        </div>
+    <?php endif; ?>
+</div>
+
+<div class="card">
+    <h3><i class="fas fa-paperclip"></i> Attachments</h3>
+    <p><a href="attachments.php" class="btn btn-sm btn-outline">Open attachments</a></p>
+    <?php if (empty($project_attachments)): ?>
+        <p class="muted-note">No files uploaded for this project.</p>
+    <?php else: ?>
+        <div class="table-responsive">
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th>File</th>
+                        <th>Uploaded</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <?php foreach ($project_attachments as $row): ?>
+                    <tr>
+                        <td><?php echo htmlspecialchars($row['file_name']); ?></td>
+                        <td><?php echo date('M d, Y', strtotime($row['created_at'])); ?></td>
+                        <td><a href="attachments.php?download=<?php echo (int)$row['id']; ?>" class="btn btn-sm btn-outline">Download</a></td>
                     </tr>
                     <?php endforeach; ?>
                 </tbody>

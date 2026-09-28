@@ -15,6 +15,12 @@ function generatePONumber() {
 
 // Handle form submissions
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    if ((isset($_POST['add_order']) || isset($_POST['update_order'])) && !canWriteDepartmentData('procurement')) {
+        $_SESSION['error'] = 'Access denied. Administrators have view-only access to procurement records.';
+        header('Location: purchase_orders.php');
+        exit();
+    }
+
     if (isset($_POST['add_order']) || isset($_POST['update_order'])) {
         $po_number = $_POST['po_number'] ?? generatePONumber();
         $purchase_request_id = (int)($_POST['purchase_request_id'] ?? 0);
@@ -43,7 +49,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     logActivity($_SESSION['user_id'], 'Updated purchase order', 'Procurement', "PO: $po_number");
                     $_SESSION['success'] = "Purchase order updated successfully!";
                 }
-                if ($status === 'confirmed') {
+                if ($status === 'confirmed' || $status === 'ready_for_warehouse') {
                     try {
                         notifyPurchaseOrderApproved($po_number, $supplier, lookupSupplierEmail($supplier));
                     } catch (Throwable $e) {
@@ -53,14 +59,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 header('Location: purchase_orders.php');
                 exit();
             } catch (PDOException $e) {
-                $error = 'Database error: ' . $e->getMessage();
+                $error = userDatabaseError($e);
             }
         }
     }
 }
 
+if (isset($_POST['mark_ready_warehouse']) && canMarkReadyForWarehouse()) {
+    $po_id = (int)($_POST['po_id'] ?? 0);
+    try {
+        $stmt = $pdo->prepare("UPDATE purchase_orders SET status = 'ready_for_warehouse' WHERE id = ? AND status IN ('confirmed', 'sent')");
+        $stmt->execute([$po_id]);
+        logActivity($_SESSION['user_id'], 'Marked PO ready for warehouse', 'Procurement', 'PO id ' . $po_id);
+        $_SESSION['success'] = 'Purchase marked ready for Warehouse receiving.';
+    } catch (PDOException $e) {
+        $_SESSION['error'] = userDatabaseError($e);
+    }
+    header('Location: purchase_orders.php');
+    exit();
+}
+
 // Get purchase requests for dropdown
-$purchase_requests = $pdo->query("SELECT pr.*, u.full_name as requestor_name FROM purchase_requests pr LEFT JOIN users u ON pr.requestor_id = u.id WHERE pr.status = 'approved' ORDER BY pr.created_at DESC")->fetchAll();
+// Only admin-confirmed PRs are eligible for PO conversion
+$purchase_requests = $pdo->query("SELECT pr.*, u.full_name as requestor_name FROM purchase_requests pr LEFT JOIN users u ON pr.requestor_id = u.id WHERE pr.status = 'confirmed' ORDER BY pr.created_at DESC")->fetchAll();
 
 // Get purchase orders
 $orders = [];
@@ -74,7 +95,7 @@ try {
     ";
     $orders = $pdo->query($query)->fetchAll();
 } catch (PDOException $e) {
-    $error = 'Database error: ' . $e->getMessage();
+    $error = userDatabaseError($e);
 }
 
 // Get single order
@@ -91,12 +112,18 @@ if ($action === 'edit' || $action === 'view') {
     $order_details = $stmt->fetch();
 }
 
+if (($action === 'add' || $action === 'edit') && !canWriteDepartmentData('procurement')) {
+    $_SESSION['error'] = 'Administrators have view-only access to purchase orders.';
+    header('Location: purchase_orders.php' . ($id ? '?action=view&id=' . $id : ''));
+    exit();
+}
+
 include '../../includes/header.php';
 ?>
 
 <div class="page-header">
     <h1><i class="fas fa-shopping-cart"></i> <?php echo $page_title; ?></h1>
-    <?php if ($action === 'list'): ?>
+    <?php if ($action === 'list' && canWriteDepartmentData('procurement')): ?>
         <a href="?action=add" class="btn btn-primary"><i class="fas fa-plus"></i> New Purchase Order</a>
     <?php endif; ?>
 </div>
@@ -166,7 +193,8 @@ include '../../includes/header.php';
                 <select name="status">
                     <option value="draft" <?php echo ($order_details['status'] ?? '') == 'draft' ? 'selected' : ''; ?>>Draft</option>
                     <option value="sent" <?php echo ($order_details['status'] ?? '') == 'sent' ? 'selected' : ''; ?>>Sent</option>
-                    <option value="confirmed" <?php echo ($order_details['status'] ?? '') == 'confirmed' ? 'selected' : ''; ?>>Confirmed</option>
+                    <option value="confirmed" <?php echo ($order_details['status'] ?? '') == 'confirmed' ? 'selected' : ''; ?>>Confirmed / Purchased</option>
+                    <option value="ready_for_warehouse" <?php echo ($order_details['status'] ?? '') == 'ready_for_warehouse' ? 'selected' : ''; ?>>Ready for Warehouse</option>
                     <option value="delivered" <?php echo ($order_details['status'] ?? '') == 'delivered' ? 'selected' : ''; ?>>Delivered</option>
                     <option value="cancelled" <?php echo ($order_details['status'] ?? '') == 'cancelled' ? 'selected' : ''; ?>>Cancelled</option>
                 </select>
@@ -202,7 +230,9 @@ include '../../includes/header.php';
         <div class="detail-row"><span>Created:</span> <?php echo date('M d, Y h:i A', strtotime($order_details['created_at'])); ?></div>
     </div>
     <div style="margin-top:1.5rem;">
+        <?php if (canWriteDepartmentData('procurement')): ?>
         <a href="?action=edit&id=<?php echo $order_details['id']; ?>" class="btn btn-warning"><i class="fas fa-edit"></i> Edit</a>
+        <?php endif; ?>
         <a href="purchase_orders.php" class="btn btn-secondary"><i class="fas fa-arrow-left"></i> Back</a>
     </div>
 </div>
@@ -214,8 +244,8 @@ include '../../includes/header.php';
         <table class="table" id="orderTable">
             <thead>
                 <tr>
-                    <th onclick="sortTable('orderTable', 0)">PO #</th>
-                    <th onclick="sortTable('orderTable', 1)">PR #</th>
+                    <th data-sort-type="string" onclick="sortTable('orderTable', 0)">PO #</th>
+                    <th data-sort-type="string" onclick="sortTable('orderTable', 1)">PR #</th>
                     <th onclick="sortTable('orderTable', 2)">Supplier</th>
                     <th onclick="sortTable('orderTable', 3)">Status</th>
                     <th onclick="sortTable('orderTable', 4)">Date</th>
@@ -237,7 +267,15 @@ include '../../includes/header.php';
                         <td><?php echo date('M d, Y', strtotime($order['created_at'])); ?></td>
                         <td>
                             <a href="?action=view&id=<?php echo $order['id']; ?>" class="btn btn-sm btn-info"><i class="fas fa-eye"></i></a>
+                            <?php if (canWriteDepartmentData('procurement')): ?>
                             <a href="?action=edit&id=<?php echo $order['id']; ?>" class="btn btn-sm btn-warning"><i class="fas fa-edit"></i></a>
+                            <?php if (in_array($order['status'], ['confirmed', 'sent'], true)): ?>
+                            <form method="POST" style="display:inline;">
+                                <input type="hidden" name="po_id" value="<?php echo (int)$order['id']; ?>">
+                                <button type="submit" name="mark_ready_warehouse" class="btn btn-sm btn-success" title="Send to Warehouse">Warehouse</button>
+                            </form>
+                            <?php endif; ?>
+                            <?php endif; ?>
                         </td>
                     </tr>
                     <?php endforeach; ?>

@@ -1,7 +1,6 @@
 <?php
 require_once 'config/database.php';
 require_once 'includes/auth.php';
-require_once 'includes/stock_alerts.php';
 requireLogin();
 
 $user = getCurrentUser();
@@ -10,241 +9,310 @@ $role = $_SESSION['role'] ?? 'staff';
 $is_manager = isManager();
 $is_admin = isAdmin();
 
-$show_projects = canViewModule('projects');
-$show_procurement = canViewModule('procurement');
-$show_accounting = canViewModule('accounting');
-$show_warehouse = canViewModule('warehouse');
-$show_payroll = canViewModule('payroll');
+// Redirect non-admin users to their department dashboard
+if (!$is_admin) {
+    switch ($department) {
+        case 'procurement':
+            header('Location: modules/procurement/dashboard.php');
+            exit();
+        case 'accounting':
+            header('Location: modules/accounting/dashboard.php');
+            exit();
+        case 'engineering':
+            header('Location: modules/projects/dashboard.php');
+            exit();
+        case 'warehouse':
+            header('Location: modules/warehouse/dashboard.php');
+            exit();
+        default:
+            header('Location: modules/projects/dashboard.php');
+            exit();
+    }
+}
 
+// Executive Admin Dashboard only for admin users
+$page_title = 'Executive Dashboard - ' . APP_NAME;
+
+// Get consolidated statistics
 $stats = [];
-$recent_activity = [];
+$department_summaries = [];
+$items_needing_attention = [];
+$recent_accomplishments = [];
+$recent_department_activity = [];
 
 try {
-    if ($show_projects) {
-        $stats['ongoing_projects'] = $pdo->query("SELECT COUNT(*) FROM projects WHERE status = 'ongoing'")->fetchColumn() ?? 0;
-        $stats['completed_projects'] = $pdo->query("SELECT COUNT(*) FROM projects WHERE status = 'completed'")->fetchColumn() ?? 0;
-        $stats['projects'] = $pdo->query("SELECT COUNT(*) FROM projects WHERE status != 'completed'")->fetchColumn() ?? 0;
+    // Project Statistics
+    $stats['active_projects'] = $pdo->query("SELECT COUNT(*) FROM projects WHERE status IN ('planning', 'ongoing')")->fetchColumn() ?? 0;
+    $stats['total_project_amount'] = $pdo->query("SELECT COALESCE(SUM(estimated_budget), 0) FROM projects")->fetchColumn() ?? 0;
+    $stats['total_project_expenses'] = $pdo->query("SELECT COALESCE(SUM(actual_cost), 0) FROM projects")->fetchColumn() ?? 0;
+    
+    // Financial Statistics
+    try {
+        $stats['available_funds'] = $pdo->query("SELECT COALESCE(SUM(amount - allocated_amount), 0) FROM funds WHERE status = 'active'")->fetchColumn() ?? 0;
+    } catch (PDOException $e) {
+        $stats['available_funds'] = 0;
     }
-
-    if ($show_procurement) {
-        $stats['purchase_requests'] = $pdo->query("SELECT COUNT(*) FROM purchase_requests WHERE status IN ('pending', 'approved')")->fetchColumn() ?? 0;
-        $stats['purchase_orders'] = $pdo->query("SELECT COUNT(*) FROM purchase_orders WHERE status IN ('draft', 'sent', 'confirmed')")->fetchColumn() ?? 0;
-        $stats['quotations'] = $pdo->query("SELECT COUNT(*) FROM quotations WHERE status = 'received'")->fetchColumn() ?? 0;
+    
+    $stats['pending_purchases'] = $pdo->query("SELECT COUNT(*) FROM purchase_requests WHERE status IN ('pending', 'approved')")->fetchColumn() ?? 0;
+    
+    // Warehouse Statistics
+    $stats['inventory_items'] = $pdo->query("SELECT COUNT(*) FROM materials WHERE status = 'active'")->fetchColumn() ?? 0;
+    $stats['low_stock_items'] = $pdo->query("SELECT COUNT(*) FROM materials WHERE current_stock <= min_stock AND min_stock > 0 AND status = 'active'")->fetchColumn() ?? 0;
+    
+    // Department Summaries
+    $department_summaries['procurement'] = [
+        'name' => 'Procurement',
+        'icon' => 'shopping-cart',
+        'color' => '#f59e0b',
+        'total_prs' => $pdo->query("SELECT COUNT(*) FROM purchase_requests")->fetchColumn() ?? 0,
+        'pending_prs' => $pdo->query("SELECT COUNT(*) FROM purchase_requests WHERE status = 'pending'")->fetchColumn() ?? 0,
+        'total_value' => $pdo->query("SELECT COALESCE(SUM(total_amount), 0) FROM purchase_requests WHERE status IN ('approved', 'confirmed', 'ordered', 'received')")->fetchColumn() ?? 0
+    ];
+    
+    $department_summaries['accounting'] = [
+        'name' => 'Accounting',
+        'icon' => 'chart-line',
+        'color' => '#36b9cc',
+        'total_invoices' => $pdo->query("SELECT COUNT(*) FROM invoices")->fetchColumn() ?? 0,
+        'total_expenses' => $pdo->query("SELECT COALESCE(SUM(amount), 0) FROM expenses WHERE status = 'paid'")->fetchColumn() ?? 0,
+        'funds_count' => 0
+    ];
+    try {
+        $result = $pdo->query("SELECT COUNT(*) FROM funds WHERE status = 'active'");
+        if ($result) {
+            $department_summaries['accounting']['funds_count'] = $result->fetchColumn() ?? 0;
+        }
+    } catch (PDOException $e) {
+        $department_summaries['accounting']['funds_count'] = 0;
     }
-
-    if ($show_accounting) {
-        $stats['pending_invoices'] = $pdo->query("SELECT COUNT(*) FROM invoices WHERE status IN ('sent', 'partial')")->fetchColumn() ?? 0;
-        $stats['total_receivables'] = $pdo->query("SELECT COALESCE(SUM(amount - paid_amount), 0) FROM invoices WHERE status IN ('sent', 'partial')")->fetchColumn() ?? 0;
-        if ($show_payroll) {
-            $stats['pending_payroll'] = $pdo->query("SELECT COUNT(*) FROM payroll WHERE status IN ('draft', 'approved')")->fetchColumn() ?? 0;
+    
+    $department_summaries['engineering'] = [
+        'name' => 'Engineering',
+        'icon' => 'hard-hat',
+        'color' => '#4e73df',
+        'total_projects' => $pdo->query("SELECT COUNT(*) FROM projects")->fetchColumn() ?? 0,
+        'ongoing_projects' => $pdo->query("SELECT COUNT(*) FROM projects WHERE status = 'ongoing'")->fetchColumn() ?? 0,
+        'accomplishments' => 0
+    ];
+    try {
+        $result = $pdo->query("SELECT COUNT(*) FROM accomplishments");
+        if ($result) {
+            $department_summaries['engineering']['accomplishments'] = $result->fetchColumn() ?? 0;
+        }
+    } catch (PDOException $e) {
+        $department_summaries['engineering']['accomplishments'] = 0;
+    }
+    
+    $department_summaries['warehouse'] = [
+        'name' => 'Warehouse',
+        'icon' => 'warehouse',
+        'color' => '#1cc88a',
+        'total_stock' => $pdo->query("SELECT COALESCE(SUM(current_stock), 0) FROM materials WHERE status = 'active'")->fetchColumn() ?? 0,
+        'stock_movements' => $pdo->query("SELECT COUNT(*) FROM stock_movements WHERE created_at >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)")->fetchColumn() ?? 0,
+        'material_requests' => 0
+    ];
+    try {
+        $result = $pdo->query("SELECT COUNT(*) FROM material_requests WHERE status = 'pending'");
+        if ($result) {
+            $department_summaries['warehouse']['material_requests'] = $result->fetchColumn() ?? 0;
+        }
+    } catch (PDOException $e) {
+        $department_summaries['warehouse']['material_requests'] = 0;
+    }
+    
+    // Items Needing Attention
+    $items_needing_attention['low_stock'] = $pdo->query("SELECT COUNT(*) FROM materials WHERE current_stock <= min_stock AND min_stock > 0 AND status = 'active'")->fetchColumn() ?? 0;
+    $items_needing_attention['pending_prs'] = $pdo->query("SELECT COUNT(*) FROM purchase_requests WHERE status = 'pending'")->fetchColumn() ?? 0;
+    $items_needing_attention['pending_material_requests'] = 0;
+    try {
+        $result = $pdo->query("SELECT COUNT(*) FROM material_requests WHERE status = 'pending'");
+        if ($result) {
+            $items_needing_attention['pending_material_requests'] = $result->fetchColumn() ?? 0;
+        }
+    } catch (PDOException $e) {
+        $items_needing_attention['pending_material_requests'] = 0;
+    }
+    $items_needing_attention['unassigned_pic'] = 0;
+    try {
+        $items_needing_attention['unassigned_pic'] = $pdo->query("SELECT COUNT(*) FROM projects WHERE COALESCE(assigned_to, in_charge_id) IS NULL AND status IN ('planning','ongoing')")->fetchColumn() ?? 0;
+    } catch (PDOException $e) {
+        $items_needing_attention['unassigned_pic'] = 0;
+    }
+    $items_needing_attention['overdue_projects'] = $pdo->query("SELECT COUNT(*) FROM projects WHERE end_date < CURDATE() AND status IN ('planning', 'ongoing')")->fetchColumn() ?? 0;
+    
+    // Recent Accomplishments
+    try {
+        $recent_accomplishments = $pdo->query("
+            SELECT a.*, p.project_code, p.name as project_name, u.full_name as created_by_name
+            FROM accomplishments a
+            LEFT JOIN projects p ON a.project_id = p.id
+            LEFT JOIN users u ON a.created_by = u.id
+            ORDER BY a.created_at DESC
+            LIMIT 5
+        ")->fetchAll();
+    } catch (PDOException $e) {
+        $recent_accomplishments = [];
+    }
+    
+    // Recent Department Activity
+    $recent_department_activity = $pdo->query("
+        SELECT al.*, u.full_name, u.department
+        FROM activity_log al
+        LEFT JOIN users u ON al.user_id = u.id
+        ORDER BY al.created_at DESC
+        LIMIT 15
+    ")->fetchAll();
+    
+    $stats['planning_projects'] = $pdo->query("SELECT COUNT(*) FROM projects WHERE status = 'planning'")->fetchColumn() ?? 0;
+    $stats['on_hold_projects'] = $pdo->query("SELECT COUNT(*) FROM projects WHERE status = 'on_hold'")->fetchColumn() ?? 0;
+    $stats['ongoing_projects'] = $pdo->query("SELECT COUNT(*) FROM projects WHERE status = 'ongoing'")->fetchColumn() ?? 0;
+    $stats['completed_projects'] = $pdo->query("SELECT COUNT(*) FROM projects WHERE status = 'completed'")->fetchColumn() ?? 0;
+    $stats['pending_pos'] = $pdo->query("SELECT COUNT(*) FROM purchase_orders WHERE status IN ('draft', 'sent', 'confirmed')")->fetchColumn() ?? 0;
+    $stats['pending_invoices'] = $pdo->query("SELECT COUNT(*) FROM invoices WHERE status IN ('sent', 'partial')")->fetchColumn() ?? 0;
+    $stats['total_projects'] = $pdo->query("SELECT COUNT(*) FROM projects")->fetchColumn() ?? 0;
+    $stats['pending_projects'] = (int) ($stats['planning_projects'] ?? 0) + (int) ($stats['on_hold_projects'] ?? 0);
+    $stats['delayed_projects'] = $pdo->query("SELECT COUNT(*) FROM projects WHERE end_date < CURDATE() AND status IN ('planning', 'ongoing', 'on_hold')")->fetchColumn() ?? 0;
+    $stats['completed_purchases'] = 0;
+    $stats['incoming_deliveries'] = (int) ($stats['pending_pos'] ?? 0);
+    $stats['outgoing_requests'] = (int) ($items_needing_attention['pending_material_requests'] ?? 0);
+    $stats['delayed_deliveries'] = 0;
+    $stats['contract_value'] = (float) ($stats['total_project_amount'] ?? 0);
+    $stats['collected'] = 0;
+    try {
+        $stats['completed_purchases'] = $pdo->query("SELECT COUNT(*) FROM purchase_orders WHERE status IN ('received', 'delivered', 'completed')")->fetchColumn() ?? 0;
+        $stats['incoming_deliveries'] = $pdo->query("SELECT COUNT(*) FROM purchase_orders WHERE status IN ('sent', 'confirmed', 'ready_for_warehouse') AND received_at IS NULL")->fetchColumn() ?? 0;
+        $stats['delayed_deliveries'] = $pdo->query("SELECT COUNT(*) FROM purchase_orders WHERE received_at IS NULL AND status IN ('sent', 'confirmed', 'ready_for_warehouse') AND created_at < DATE_SUB(NOW(), INTERVAL 14 DAY)")->fetchColumn() ?? 0;
+    } catch (PDOException $e) {
+        try {
+            $stats['incoming_deliveries'] = $pdo->query("SELECT COUNT(*) FROM purchase_orders WHERE status IN ('sent', 'confirmed')")->fetchColumn() ?? 0;
+        } catch (PDOException $e2) {
+            $stats['incoming_deliveries'] = (int) ($stats['pending_pos'] ?? 0);
+        }
+    }
+    try {
+        $contract = $pdo->query("SELECT COALESCE(SUM(contract_amount), 0) FROM project_financials")->fetchColumn();
+        if ($contract !== false && (float) $contract > 0) {
+            $stats['contract_value'] = (float) $contract;
+        }
+    } catch (PDOException $e) {
+        $stats['contract_value'] = (float) ($stats['total_project_amount'] ?? 0);
+    }
+    try {
+        $stats['collected'] = $pdo->query("SELECT COALESCE(SUM(paid_amount), 0) FROM invoices")->fetchColumn() ?? 0;
+    } catch (PDOException $e) {
+        try {
+            $stats['collected'] = $pdo->query("SELECT COALESCE(SUM(amount), 0) FROM invoices WHERE status = 'paid'")->fetchColumn() ?? 0;
+        } catch (PDOException $e2) {
+            $stats['collected'] = 0;
         }
     }
 
-    if ($show_warehouse) {
-        $stats['total_items'] = $pdo->query("SELECT COUNT(*) FROM materials WHERE status = 'active'")->fetchColumn() ?? 0;
-        $stats['low_stock'] = $pdo->query("SELECT COUNT(*) FROM materials WHERE current_stock <= min_stock AND status = 'active'")->fetchColumn() ?? 0;
-        $stats['materials'] = $stats['total_items'];
+    $cost_trend_labels = [];
+    $cost_trend_budget = [];
+    $cost_trend_actual = [];
+    try {
+        $trend_rows = $pdo->query("
+            SELECT DATE_FORMAT(COALESCE(start_date, created_at), '%b') AS label,
+                   DATE_FORMAT(COALESCE(start_date, created_at), '%Y-%m') AS ym,
+                   COALESCE(SUM(estimated_budget), 0) AS budget,
+                   COALESCE(SUM(actual_cost), 0) AS actual
+            FROM projects
+            WHERE COALESCE(start_date, created_at) >= DATE_SUB(CURDATE(), INTERVAL 5 MONTH)
+            GROUP BY ym, label
+            ORDER BY ym
+        ")->fetchAll();
+        foreach ($trend_rows as $row) {
+            $cost_trend_labels[] = $row['label'];
+            $cost_trend_budget[] = (float) $row['budget'];
+            $cost_trend_actual[] = (float) $row['actual'];
+        }
+    } catch (PDOException $e) {
+        $cost_trend_labels = [];
     }
 
-    $activity_sql = "
-        SELECT al.*, u.full_name
-        FROM activity_log al
-        LEFT JOIN users u ON al.user_id = u.id
-    ";
-
-    if ($is_admin) {
-        $activity_sql .= " ORDER BY al.created_at DESC LIMIT 10";
-        $recent_activity = $pdo->query($activity_sql)->fetchAll();
-    } else {
-        $module_filter = [
-            'projects' => ['Projects', 'Security'],
-            'procurement' => ['Procurement', 'Security'],
-            'accounting' => ['Accounting', 'Security'],
-            'warehouse' => ['Warehouse', 'Security'],
-        ];
-        $modules = $module_filter[$department] ?? ['Security'];
-        $placeholders = implode(',', array_fill(0, count($modules), '?'));
-        $stmt = $pdo->prepare($activity_sql . " WHERE al.module IN ($placeholders) OR al.user_id = ? ORDER BY al.created_at DESC LIMIT 10");
-        $stmt->execute(array_merge($modules, [$_SESSION['user_id']]));
-        $recent_activity = $stmt->fetchAll();
+    try {
+        $pdo->exec("UPDATE projects
+            SET project_code = CONCAT('PRJ-', YEAR(IFNULL(created_at, NOW())), '-', LPAD(id, 3, '0'))
+            WHERE project_code LIKE '%E+%' OR project_code LIKE '%e+%' OR CHAR_LENGTH(project_code) > 24");
+    } catch (PDOException $e) {
+        // non-fatal
     }
 
-} catch(PDOException $e) {
-    $stats = [];
-    $recent_activity = [];
+    // Project Overview
+    try {
+        $project_overview = $pdo->query("
+            SELECT p.id, p.project_code, p.name, p.status, p.location, p.client, p.start_date, p.end_date,
+                   p.estimated_budget, p.actual_cost, p.progress,
+                   COALESCE(ua.full_name, ui.full_name) AS in_charge_name
+            FROM projects p
+            LEFT JOIN users ua ON p.assigned_to = ua.id
+            LEFT JOIN users ui ON p.in_charge_id = ui.id
+            ORDER BY p.created_at DESC
+            LIMIT 8
+        ")->fetchAll();
+    } catch (PDOException $e) {
+        try {
+            $project_overview = $pdo->query("
+                SELECT id, project_code, name, status, location, client, start_date, end_date, estimated_budget, actual_cost, progress
+                FROM projects
+                ORDER BY created_at DESC
+                LIMIT 8
+            ")->fetchAll();
+        } catch (PDOException $e2) {
+            $project_overview = $pdo->query("
+                SELECT id, project_code, name, status, location, start_date, end_date, estimated_budget, actual_cost
+                FROM projects
+                ORDER BY created_at DESC
+                LIMIT 8
+            ")->fetchAll();
+        }
+    }
+    
+    // Consolidated Reports Summary
+    $consolidated_reports = [
+        'total_projects' => $pdo->query("SELECT COUNT(*) FROM projects")->fetchColumn() ?? 0,
+        'total_budget' => $pdo->query("SELECT COALESCE(SUM(estimated_budget), 0) FROM projects")->fetchColumn() ?? 0,
+        'total_actual_cost' => $pdo->query("SELECT COALESCE(SUM(actual_cost), 0) FROM projects")->fetchColumn() ?? 0,
+        'total_invoices' => $pdo->query("SELECT COUNT(*) FROM invoices")->fetchColumn() ?? 0,
+        'total_invoice_amount' => $pdo->query("SELECT COALESCE(SUM(amount), 0) FROM invoices")->fetchColumn() ?? 0,
+        'total_expenses' => $pdo->query("SELECT COALESCE(SUM(amount), 0) FROM expenses")->fetchColumn() ?? 0,
+        'total_stock_movements' => $pdo->query("SELECT COUNT(*) FROM stock_movements")->fetchColumn() ?? 0,
+        'activity_count' => $pdo->query("SELECT COUNT(*) FROM activity_log")->fetchColumn() ?? 0,
+    ];
+    
+} catch (PDOException $e) {
+    $error = userDatabaseError($e);
 }
 
-$page_title = 'Dashboard - ' . APP_NAME;
+if (!isset($project_overview)) {
+    $project_overview = [];
+}
+if (!isset($cost_trend_labels)) {
+    $cost_trend_labels = [];
+    $cost_trend_budget = [];
+    $cost_trend_actual = [];
+}
+
+if (!function_exists('dashboardTimeProgress')) {
+function dashboardTimeProgress(array $project) {
+    $status = $project['status'] ?? '';
+    if ($status === 'completed') {
+        return 100.0;
+    }
+    $manual = isset($project['progress']) && $project['progress'] !== null && $project['progress'] !== ''
+        ? (float) $project['progress']
+        : 0.0;
+    if ($manual > 0) {
+        return max(0.0, min(100.0, $manual));
+    }
+    $start = !empty($project['start_date']) ? strtotime($project['start_date']) : false;
+    $end = !empty($project['end_date']) ? strtotime($project['end_date']) : false;
+    if (!$start || !$end || $end <= $start) {
+        return 0.0;
+    }
+    return max(0.0, min(100.0, ((time() - $start) / ($end - $start)) * 100));
+}
+}
 include 'includes/header.php';
-?>
-
-<div class="page-header">
-    <h1><i class="fas fa-tachometer-alt"></i> Dashboard</h1>
-    <div class="dept-badge">
-        <i class="fas <?php echo getDepartmentIcon($department); ?>"></i>
-        <?php echo getDepartmentName($department); ?>
-        <?php if ($is_manager): ?>
-            <span class="role-chip">MANAGER</span>
-        <?php endif; ?>
-    </div>
-</div>
-
-<?php if (isset($_SESSION['error'])): ?>
-    <div class="alert alert-danger"><?php echo htmlspecialchars($_SESSION['error']); unset($_SESSION['error']); ?></div>
-<?php endif; ?>
-<?php if (isset($_SESSION['success'])): ?>
-    <div class="alert alert-success"><?php echo htmlspecialchars($_SESSION['success']); unset($_SESSION['success']); ?></div>
-<?php endif; ?>
-
-<div class="card welcome-card">
-    <h2>Welcome back, <?php echo htmlspecialchars($_SESSION['full_name'] ?? 'User'); ?>!</h2>
-    <p>
-        <?php if ($show_projects && !$is_admin): ?>
-            Your project workspace is ready.
-        <?php elseif ($show_procurement && !$is_admin): ?>
-            Here's the latest on purchase requests and orders.
-        <?php elseif ($show_accounting && !$is_admin): ?>
-            Here's a snapshot of invoices, payments, and payroll.
-        <?php elseif ($show_warehouse && !$is_admin): ?>
-            Here's the current warehouse stock position.
-        <?php else: ?>
-            Here's an overview across all departments.
-        <?php endif; ?>
-    </p>
-</div>
-
-<div class="quick-actions">
-    <?php if ($show_procurement): ?>
-    <a href="<?php echo APP_URL; ?>modules/procurement/purchase_requests.php?action=add" class="quick-action accent-procurement">
-        <i class="fas fa-file-invoice"></i>
-        <span>New Purchase Request</span>
-    </a>
-    <a href="<?php echo APP_URL; ?>modules/procurement/purchase_orders.php?action=add" class="quick-action accent-procurement">
-        <i class="fas fa-shopping-cart"></i>
-        <span>New Purchase Order</span>
-    </a>
-    <?php endif; ?>
-
-    <?php if ($show_projects): ?>
-    <a href="<?php echo APP_URL; ?>modules/projects/dashboard.php" class="quick-action accent-projects">
-        <i class="fas fa-chart-bar"></i>
-        <span>Projects Dashboard</span>
-    </a>
-    <a href="<?php echo APP_URL; ?>modules/projects/projects.php?action=add" class="quick-action accent-projects">
-        <i class="fas fa-building"></i>
-        <span>New Project</span>
-    </a>
-    <?php endif; ?>
-
-    <?php if ($show_accounting): ?>
-    <a href="<?php echo APP_URL; ?>modules/accounting/invoices.php?action=add" class="quick-action accent-accounting">
-        <i class="fas fa-file-invoice-dollar"></i>
-        <span>New Invoice</span>
-    </a>
-    <?php if ($show_payroll): ?>
-    <a href="<?php echo APP_URL; ?>modules/accounting/payroll.php?action=add" class="quick-action accent-accounting">
-        <i class="fas fa-users"></i>
-        <span>New Payroll</span>
-    </a>
-    <?php endif; ?>
-    <?php endif; ?>
-
-    <?php if ($show_warehouse): ?>
-    <a href="<?php echo APP_URL; ?>modules/warehouse/stock.php?action=add" class="quick-action accent-warehouse">
-        <i class="fas fa-warehouse"></i>
-        <span>Receive Stock</span>
-    </a>
-    <?php endif; ?>
-
-</div>
-
-<?php renderLowStockBanner(APP_URL . 'modules/warehouse/inventory.php'); ?>
-
-<div class="stats-grid">
-    <?php if ($show_procurement): ?>
-    <div class="stat-card accent-procurement">
-        <div class="stat-icon"><i class="fas fa-file-invoice"></i></div>
-        <div class="stat-value"><?php echo $stats['purchase_requests'] ?? 0; ?></div>
-        <div class="stat-label">Pending Purchase Requests</div>
-    </div>
-    <div class="stat-card accent-procurement">
-        <div class="stat-icon"><i class="fas fa-shopping-cart"></i></div>
-        <div class="stat-value"><?php echo $stats['purchase_orders'] ?? 0; ?></div>
-        <div class="stat-label">Active Purchase Orders</div>
-    </div>
-    <?php endif; ?>
-
-    <?php if ($show_projects): ?>
-    <div class="stat-card accent-projects">
-        <div class="stat-icon"><i class="fas fa-play-circle"></i></div>
-        <div class="stat-value"><?php echo $stats['ongoing_projects'] ?? 0; ?></div>
-        <div class="stat-label">Ongoing Projects</div>
-    </div>
-    <div class="stat-card accent-projects">
-        <div class="stat-icon"><i class="fas fa-check-circle"></i></div>
-        <div class="stat-value"><?php echo $stats['completed_projects'] ?? 0; ?></div>
-        <div class="stat-label">Completed Projects</div>
-    </div>
-    <?php endif; ?>
-
-    <?php if ($show_accounting): ?>
-    <div class="stat-card accent-accounting">
-        <div class="stat-icon"><i class="fas fa-file-invoice-dollar"></i></div>
-        <div class="stat-value"><?php echo $stats['pending_invoices'] ?? 0; ?></div>
-        <div class="stat-label">Pending Invoices</div>
-    </div>
-    <div class="stat-card accent-accounting">
-        <div class="stat-icon"><i class="fas fa-money-bill-wave"></i></div>
-        <div class="stat-value">₱<?php echo number_format($stats['total_receivables'] ?? 0, 2); ?></div>
-        <div class="stat-label">Total Receivables</div>
-    </div>
-    <?php if ($show_payroll): ?>
-    <div class="stat-card accent-warning">
-        <div class="stat-icon"><i class="fas fa-users"></i></div>
-        <div class="stat-value"><?php echo $stats['pending_payroll'] ?? 0; ?></div>
-        <div class="stat-label">Pending Payroll</div>
-    </div>
-    <?php endif; ?>
-    <?php endif; ?>
-
-    <?php if ($show_warehouse): ?>
-    <div class="stat-card accent-warehouse">
-        <div class="stat-icon"><i class="fas fa-boxes"></i></div>
-        <div class="stat-value"><?php echo $stats['total_items'] ?? 0; ?></div>
-        <div class="stat-label">Items in Catalog</div>
-    </div>
-    <div class="stat-card accent-warning">
-        <div class="stat-icon"><i class="fas fa-exclamation-triangle"></i></div>
-        <div class="stat-value"><?php echo $stats['low_stock'] ?? 0; ?></div>
-        <div class="stat-label">Low Stock Items</div>
-    </div>
-    <?php endif; ?>
-</div>
-
-<div class="card">
-    <h3 class="section-title"><i class="fas fa-clock"></i> Recent Activity</h3>
-    <?php if (empty($recent_activity)): ?>
-        <p class="empty-copy">No recent activity</p>
-    <?php else: ?>
-        <div class="activity-list">
-        <?php foreach ($recent_activity as $activity): ?>
-        <div class="activity-item">
-            <div>
-                <span class="activity-action"><?php echo htmlspecialchars($activity['action']); ?></span>
-                <span class="activity-module"> — <?php echo htmlspecialchars($activity['module']); ?></span>
-                <?php if ($activity['details']): ?>
-                    <div class="activity-details"><?php echo htmlspecialchars($activity['details']); ?></div>
-                <?php endif; ?>
-            </div>
-            <div class="activity-meta">
-                <?php echo htmlspecialchars($activity['full_name'] ?? 'System'); ?>
-                <span>•</span>
-                <?php echo date('M d, Y h:i A', strtotime($activity['created_at'])); ?>
-            </div>
-        </div>
-        <?php endforeach; ?>
-        </div>
-    <?php endif; ?>
-</div>
-
-<?php include 'includes/footer.php'; ?>
+include 'includes/exec_admin_view.php';
+include 'includes/footer.php';

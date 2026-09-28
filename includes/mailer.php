@@ -153,28 +153,6 @@ if (!function_exists('sendMail')) {
         notifyDepartment('accounting', $subject, $body);
     }
 
-    function notifyPayslipReady($employee_name, $payroll_number, $net_pay, $period_start, $period_end) {
-        global $pdo;
-        $subject = 'Your payslip is ready: ' . $payroll_number;
-        $body = '<p>Hello ' . htmlspecialchars($employee_name) . ',</p>'
-            . '<p>Your payslip is ready.</p>'
-            . '<p><strong>Payroll #:</strong> ' . htmlspecialchars($payroll_number) . '<br>'
-            . '<strong>Period:</strong> ' . htmlspecialchars($period_start) . ' to ' . htmlspecialchars($period_end) . '<br>'
-            . '<strong>Net pay:</strong> ₱' . number_format((float) $net_pay, 2) . '</p>';
-        try {
-            $stmt = $pdo->prepare("SELECT email FROM users WHERE full_name = ? AND status = 'active' LIMIT 1");
-            $stmt->execute([$employee_name]);
-            $user = $stmt->fetch();
-            if (!empty($user['email'])) {
-                sendMail($user['email'], $subject, mailTemplate($subject, $body));
-            } else {
-                logActivity($_SESSION['user_id'] ?? null, 'Email skipped', 'Mail', 'No matching user email for employee: ' . $employee_name);
-            }
-        } catch (Throwable $e) {
-            logActivity($_SESSION['user_id'] ?? null, 'Email failed', 'Mail', $e->getMessage());
-        }
-    }
-
     function notifyLowStock($material_name, $current_stock, $min_stock, $unit = 'pcs') {
         $subject = 'Low stock alert: ' . $material_name;
         $body = '<p>A material has reached or fallen below its minimum stock level.</p>'
@@ -183,6 +161,15 @@ if (!function_exists('sendMail')) {
             . '<strong>Minimum stock:</strong> ' . htmlspecialchars((string) $min_stock) . ' ' . htmlspecialchars((string) $unit) . '</p>'
             . '<p>Please review warehouse inventory and replenish as needed.</p>';
         notifyDepartment('warehouse', $subject, $body);
+    }
+
+    function notifyPurchaseRequestConfirmed($pr_number, $purpose = '') {
+        $subject = 'Purchase request confirmed by admin: ' . $pr_number;
+        $body = '<p>Purchase request <strong>' . htmlspecialchars($pr_number) . '</strong> has been confirmed by an administrator and is ready to convert into a Purchase Order.</p>';
+        if ($purpose !== '') {
+            $body .= '<p><strong>Purpose:</strong> ' . htmlspecialchars($purpose) . '</p>';
+        }
+        notifyDepartment('procurement', $subject, $body);
     }
 
     function lookupSupplierEmail($supplier_name) {

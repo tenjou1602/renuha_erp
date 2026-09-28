@@ -2,117 +2,150 @@
 require_once '../../config/database.php';
 require_once '../../includes/auth.php';
 
-requireDepartment(['projects']);
+requireDepartment(['engineering']);
 
-$page_title = 'Projects Dashboard';
+$page_title = 'Engineering Dashboard';
 
-// Get statistics
+$stats = [
+    'active_projects' => 0,
+    'upcoming_projects' => 0,
+    'ongoing_projects' => 0,
+    'completed_projects' => 0,
+    'total_budget' => 0,
+    'actual_cost' => 0,
+    'accomplishments' => 0,
+    'attachments' => 0,
+    'material_requirements' => 0,
+];
+$recent_projects = [];
+$recent_accomplishments = [];
+
 try {
-    $stats = [];
-    $stats['total_projects'] = $pdo->query("SELECT COUNT(*) FROM projects")->fetchColumn() ?? 0;
+    $stats['active_projects'] = $pdo->query("SELECT COUNT(*) FROM projects WHERE status IN ('planning', 'ongoing')")->fetchColumn() ?? 0;
+    $stats['upcoming_projects'] = $pdo->query("SELECT COUNT(*) FROM projects WHERE status = 'planning' AND start_date > CURDATE()")->fetchColumn() ?? 0;
     $stats['ongoing_projects'] = $pdo->query("SELECT COUNT(*) FROM projects WHERE status = 'ongoing'")->fetchColumn() ?? 0;
     $stats['completed_projects'] = $pdo->query("SELECT COUNT(*) FROM projects WHERE status = 'completed'")->fetchColumn() ?? 0;
-    $stats['planning_projects'] = $pdo->query("SELECT COUNT(*) FROM projects WHERE status = 'planning'")->fetchColumn() ?? 0;
-    $stats['on_hold_projects'] = $pdo->query("SELECT COUNT(*) FROM projects WHERE status = 'on_hold'")->fetchColumn() ?? 0;
     $stats['total_budget'] = $pdo->query("SELECT COALESCE(SUM(estimated_budget), 0) FROM projects")->fetchColumn() ?? 0;
-    $stats['total_cost'] = $pdo->query("SELECT COALESCE(SUM(actual_cost), 0) FROM projects WHERE status IN ('ongoing', 'completed')")->fetchColumn() ?? 0;
-    
-    // Recent projects
-    $recent_projects = $pdo->query("SELECT * FROM projects ORDER BY created_at DESC LIMIT 5")->fetchAll();
-    
+    $stats['actual_cost'] = $pdo->query("SELECT COALESCE(SUM(actual_cost), 0) FROM projects")->fetchColumn() ?? 0;
+
+    try {
+        $stats['accomplishments'] = $pdo->query("SELECT COUNT(*) FROM accomplishments")->fetchColumn() ?? 0;
+    } catch (PDOException $e) {
+        logActivity($_SESSION['user_id'] ?? null, 'Database error', 'Projects', $e->getMessage());
+        $stats['accomplishments'] = 0;
+    }
+
+    try {
+        $stats['attachments'] = $pdo->query("SELECT COUNT(*) FROM attachments")->fetchColumn() ?? 0;
+    } catch (PDOException $e) {
+        logActivity($_SESSION['user_id'] ?? null, 'Database error', 'Projects', $e->getMessage());
+        $stats['attachments'] = 0;
+    }
+
+    $stats['material_requirements'] = $pdo->query("SELECT COUNT(*) FROM materials WHERE current_stock <= min_stock AND min_stock > 0 AND status = 'active'")->fetchColumn() ?? 0;
+    if (isAdmin()) {
+        $recent_projects = $pdo->query("SELECT id, project_code, name, status, location, start_date, end_date, in_charge_id FROM projects ORDER BY created_at DESC LIMIT 8")->fetchAll();
+    } else {
+        $stmt = $pdo->prepare("SELECT id, project_code, name, status, location, start_date, end_date, in_charge_id FROM projects WHERE in_charge_id = ? OR in_charge_id IS NULL ORDER BY (in_charge_id = ?) DESC, created_at DESC LIMIT 8");
+        $stmt->execute([$_SESSION['user_id'], $_SESSION['user_id']]);
+        $recent_projects = $stmt->fetchAll();
+    }
+
+    try {
+        $recent_accomplishments = $pdo->query("
+            SELECT a.*, p.project_code, p.name as project_name
+            FROM accomplishments a
+            LEFT JOIN projects p ON a.project_id = p.id
+            ORDER BY a.created_at DESC
+            LIMIT 5
+        ")->fetchAll();
+    } catch (PDOException $e) {
+        logActivity($_SESSION['user_id'] ?? null, 'Database error', 'Projects', $e->getMessage());
+        $recent_accomplishments = [];
+    }
 } catch (PDOException $e) {
-    $error = 'Database error: ' . $e->getMessage();
+    $error = userDatabaseError($e, 'Projects');
 }
 
 include '../../includes/header.php';
 ?>
 
-<div class="page-header">
-    <h1><i class="fas fa-hard-hat"></i> Projects Dashboard</h1>
-</div>
-
-<?php if (isset($error)): ?>
-    <div class="alert alert-danger"><?php echo htmlspecialchars($error); ?></div>
-<?php endif; ?>
-
-<!-- Stats Cards -->
-<div class="stats-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:1rem;margin-bottom:1.5rem;">
-    <div class="card" style="border-left:4px solid #4e73df;">
-        <div style="font-size:0.85rem;color:#64748b;">Total Projects</div>
-        <div style="font-size:1.8rem;font-weight:700;"><?php echo number_format($stats['total_projects'] ?? 0); ?></div>
-    </div>
-    <div class="card" style="border-left:4px solid #f6c23e;">
-        <div style="font-size:0.85rem;color:#64748b;">Ongoing</div>
-        <div style="font-size:1.8rem;font-weight:700;"><?php echo number_format($stats['ongoing_projects'] ?? 0); ?></div>
-    </div>
-    <div class="card" style="border-left:4px solid #1cc88a;">
-        <div style="font-size:0.85rem;color:#64748b;">Completed</div>
-        <div style="font-size:1.8rem;font-weight:700;"><?php echo number_format($stats['completed_projects'] ?? 0); ?></div>
-    </div>
-    <div class="card" style="border-left:4px solid #fef3c7;">
-        <div style="font-size:0.85rem;color:#64748b;">Planning</div>
-        <div style="font-size:1.8rem;font-weight:700;"><?php echo number_format($stats['planning_projects'] ?? 0); ?></div>
-    </div>
-</div>
-
-<div class="stats-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:1rem;margin-bottom:1.5rem;">
-    <div class="card" style="border-left:4px solid #36b9cc;">
-        <div style="font-size:0.85rem;color:#64748b;">Total Budget</div>
-        <div style="font-size:1.8rem;font-weight:700;">₱<?php echo number_format($stats['total_budget'] ?? 0, 2); ?></div>
-    </div>
-    <div class="card" style="border-left:4px solid #e74a3b;">
-        <div style="font-size:0.85rem;color:#64748b;">Actual Cost</div>
-        <div style="font-size:1.8rem;font-weight:700;">₱<?php echo number_format($stats['total_cost'] ?? 0, 2); ?></div>
-    </div>
-</div>
-
-<!-- Quick Actions -->
-<div class="card">
-    <h3 style="margin-bottom:1rem;">Quick Actions</h3>
-    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:1rem;">
-        <a href="projects.php?action=add" class="btn btn-primary" style="justify-content:center;"><i class="fas fa-plus"></i> New Project</a>
-        <a href="projects.php" class="btn btn-info" style="justify-content:center;"><i class="fas fa-list"></i> View All Projects</a>
-        <a href="project_details.php" class="btn btn-warning" style="justify-content:center;"><i class="fas fa-chart-bar"></i> Project Details</a>
-    </div>
-</div>
-
-<!-- Recent Projects -->
-<div class="card">
-    <h3 style="margin-bottom:1rem;"><i class="fas fa-clock"></i> Recent Projects</h3>
-    <?php if (empty($recent_projects)): ?>
-        <div class="empty-state">
-            <i class="fas fa-building"></i>
-            <p>No projects yet.</p>
-            <a href="projects.php?action=add" class="btn btn-primary btn-sm" style="margin-top:0.5rem;">Create First Project</a>
+<div class="dept-dash">
+    <div class="dept-head">
+        <div>
+            <p class="dept-kicker">Engineering Department</p>
+            <h1><i class="fas fa-hard-hat"></i> Engineering Dashboard</h1>
+            <p class="dept-sub">Plan projects, track progress, and prepare material requirements.</p>
         </div>
-    <?php else: ?>
-        <div class="table-responsive">
-            <table class="table">
-                <thead>
-                    <tr>
-                        <th>Project Code</th>
-                        <th>Name</th>
-                        <th>Location</th>
-                        <th>Status</th>
-                        <th>Budget</th>
-                        <th>Action</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <?php foreach ($recent_projects as $project): ?>
-                    <tr>
-                        <td><strong><?php echo htmlspecialchars($project['project_code']); ?></strong></td>
-                        <td><?php echo htmlspecialchars($project['name']); ?></td>
-                        <td><?php echo htmlspecialchars($project['location'] ?? 'N/A'); ?></td>
-                        <td><span class="badge badge-<?php echo $project['status']; ?>"><?php echo ucfirst($project['status']); ?></span></td>
-                        <td>₱<?php echo number_format($project['estimated_budget'], 2); ?></td>
-                        <td><a href="project_details.php?id=<?php echo $project['id']; ?>" class="btn btn-sm btn-info"><i class="fas fa-eye"></i></a></td>
-                    </tr>
-                    <?php endforeach; ?>
-                </tbody>
-            </table>
+        <div class="dept-actions">
+            <a href="material_requirements.php" class="btn btn-primary"><i class="fas fa-clipboard-list"></i> Material Requirements</a>
+            <a href="<?php echo APP_URL; ?>modules/procurement/purchase_requests.php?action=add" class="btn btn-outline"><i class="fas fa-file-invoice"></i> Submit to Procurement</a>
+            <a href="accomplishments.php" class="btn btn-outline"><i class="fas fa-check-circle"></i> Accomplishments</a>
         </div>
+    </div>
+
+    <?php if (isset($error)): ?>
+        <div class="alert alert-danger"><?php echo htmlspecialchars($error); ?></div>
     <?php endif; ?>
+
+    <div class="dept-kpis">
+        <div class="dept-kpi green"><div class="ico"><i class="fas fa-play-circle"></i></div><div><div class="num"><?php echo number_format($stats['ongoing_projects']); ?></div><div class="lbl">Ongoing</div></div></div>
+        <div class="dept-kpi blue"><div class="ico"><i class="fas fa-building"></i></div><div><div class="num"><?php echo number_format($stats['active_projects']); ?></div><div class="lbl">Active Projects</div></div></div>
+        <div class="dept-kpi orange"><div class="ico"><i class="fas fa-clock"></i></div><div><div class="num"><?php echo number_format($stats['upcoming_projects']); ?></div><div class="lbl">Upcoming</div></div></div>
+        <div class="dept-kpi purple"><div class="ico"><i class="fas fa-check-circle"></i></div><div><div class="num"><?php echo number_format($stats['completed_projects']); ?></div><div class="lbl">Completed</div></div></div>
+        <div class="dept-kpi teal"><div class="ico"><i class="fas fa-coins"></i></div><div><div class="num">₱<?php echo number_format((float) $stats['total_budget'], 2); ?></div><div class="lbl">Total Budget</div></div></div>
+        <div class="dept-kpi red"><div class="ico"><i class="fas fa-receipt"></i></div><div><div class="num">₱<?php echo number_format((float) $stats['actual_cost'], 2); ?></div><div class="lbl">Actual Cost</div></div></div>
+        <div class="dept-kpi sky"><div class="ico"><i class="fas fa-clipboard-check"></i></div><div><div class="num"><?php echo number_format($stats['accomplishments']); ?></div><div class="lbl">Accomplishments</div></div></div>
+        <div class="dept-kpi slate"><div class="ico"><i class="fas fa-paperclip"></i></div><div><div class="num"><?php echo number_format($stats['attachments']); ?></div><div class="lbl">Attachments</div></div></div>
+        <div class="dept-kpi orange"><div class="ico"><i class="fas fa-boxes"></i></div><div><div class="num"><?php echo number_format($stats['material_requirements']); ?></div><div class="lbl">Low Stock Materials</div></div></div>
+    </div>
+
+    <div class="dept-grid">
+        <div class="dept-panel">
+            <h3><i class="fas fa-building"></i> Recent Projects</h3>
+            <?php if (empty($recent_projects)): ?>
+                <div class="empty-state compact"><i class="fas fa-building"></i><p>No projects yet.</p></div>
+            <?php else: ?>
+            <div class="table-responsive">
+                <table class="dept-table">
+                    <thead><tr><th>Code</th><th>Name</th><th>Location</th><th>Status</th><th>End Date</th></tr></thead>
+                    <tbody>
+                    <?php foreach ($recent_projects as $project): ?>
+                        <tr>
+                            <td><strong><?php echo htmlspecialchars(displayDocumentCode($project['project_code'])); ?></strong></td>
+                            <td><?php echo htmlspecialchars($project['name']); ?></td>
+                            <td><?php echo htmlspecialchars($project['location'] ?? 'N/A'); ?></td>
+                            <td><span class="dept-badge <?php echo htmlspecialchars($project['status']); ?>"><?php echo ucfirst(str_replace('_', ' ', $project['status'])); ?></span></td>
+                            <td><?php echo $project['end_date'] ? date('M d, Y', strtotime($project['end_date'])) : 'N/A'; ?></td>
+                        </tr>
+                    <?php endforeach; ?>
+                    </tbody>
+                </table>
+            </div>
+            <?php endif; ?>
+        </div>
+        <div class="dept-panel">
+            <h3><i class="fas fa-bolt"></i> Quick Actions</h3>
+            <div class="dept-qa">
+                <a class="t1" href="projects.php"><i class="fas fa-tasks"></i>Manage Projects</a>
+                <a class="t2" href="material_requirements.php"><i class="fas fa-boxes"></i>Material Requirements</a>
+                <a class="t3" href="accomplishments.php"><i class="fas fa-clipboard-check"></i>Accomplishments</a>
+                <a class="t4" href="project_reports.php"><i class="fas fa-chart-bar"></i>Project Reports</a>
+            </div>
+            <?php if (!empty($recent_accomplishments)): ?>
+            <h3 style="margin-top:1.1rem;"><i class="fas fa-clipboard-check"></i> Recent Accomplishments</h3>
+            <ul style="list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:.65rem;">
+                <?php foreach (array_slice($recent_accomplishments, 0, 4) as $accomplishment): ?>
+                <li style="font-size:.8rem;color:#475569;">
+                    <strong><?php echo htmlspecialchars(displayDocumentCode($accomplishment['project_code'] ?? 'N/A')); ?></strong>
+                    — <?php echo htmlspecialchars(substr($accomplishment['description'] ?? '', 0, 48)); ?>
+                    <div style="color:#94a3b8;font-size:.72rem;"><?php echo number_format((float) $accomplishment['completion_percentage'], 1); ?>% · <?php echo date('M d, Y', strtotime($accomplishment['created_at'])); ?></div>
+                </li>
+                <?php endforeach; ?>
+            </ul>
+            <?php endif; ?>
+        </div>
+    </div>
 </div>
 
 <?php include '../../includes/footer.php'; ?>
