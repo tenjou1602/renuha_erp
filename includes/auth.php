@@ -170,7 +170,7 @@ if (!function_exists('checkAuth')) {
 
     /** Accounting assigns Engineering / Project In-Charge. */
     function canAssignProjectInCharge() {
-        return canWriteDepartmentData('accounting');
+        return isAdmin() || canWriteDepartmentData('accounting');
     }
 
     /** Engineering submits needs to Procurement; Procurement can also encode PRs. */

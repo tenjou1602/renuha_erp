@@ -6,7 +6,7 @@ requireDepartment(['engineering']);
 
 $page_title = 'Project Reports';
 $report_type = $_GET['report'] ?? 'overview';
-$start_date = $_GET['start_date'] ?? date('Y-m-01');
+$start_date = $_GET['start_date'] ?? date('Y-01-01');
 $end_date = $_GET['end_date'] ?? date('Y-m-t');
 
 // Report data
@@ -19,7 +19,7 @@ try {
             $report_data['active_projects'] = $pdo->query("SELECT COUNT(*) FROM projects WHERE status IN ('planning', 'ongoing')")->fetchColumn() ?? 0;
             $report_data['completed_projects'] = $pdo->query("SELECT COUNT(*) FROM projects WHERE status = 'completed'")->fetchColumn() ?? 0;
             $report_data['total_budget'] = $pdo->query("SELECT COALESCE(SUM(estimated_budget), 0) FROM projects")->fetchColumn() ?? 0;
-            $report_data['total_actual_cost'] = $pdo->query("SELECT COALESCE(SUM(actual_cost), 0) FROM projects")->fetchColumn() ?? 0;
+            $report_data['total_actual_cost'] = $pdo->query("SELECT COALESCE(SUM(amount), 0) FROM expenses WHERE status IN ('pending', 'paid')")->fetchColumn() ?? 0;
             
             // Project status breakdown
             $report_data['status_breakdown'] = $pdo->query("
@@ -172,14 +172,13 @@ try {
                     p.actual_cost,
                     (p.estimated_budget - p.actual_cost) as remaining_budget,
                     p.status,
-                    COUNT(DISTINCT inv.id) as invoice_count,
-                    COALESCE(SUM(inv.amount), 0) as invoice_total,
-                    COUNT(DISTINCT exp.id) as expense_count,
-                    COALESCE(SUM(exp.amount), 0) as expense_total
+                    (SELECT COUNT(*) FROM invoices inv WHERE inv.project_id = p.id) as invoice_count,
+                    (SELECT COALESCE(SUM(inv.amount), 0) FROM invoices inv WHERE inv.project_id = p.id) as invoice_total,
+                    (SELECT COUNT(*) FROM expenses exp WHERE exp.project_id = p.id) as expense_count,
+                    (SELECT COALESCE(SUM(exp.amount), 0) FROM expenses exp WHERE exp.project_id = p.id) as expense_total,
+                    (SELECT COUNT(*) FROM client_quotations cq WHERE cq.project_id = p.id) as quote_count,
+                    (SELECT COALESCE(SUM(cq.grand_total), 0) FROM client_quotations cq WHERE cq.project_id = p.id AND cq.status = 'approved') as quote_pipeline
                 FROM projects p
-                LEFT JOIN invoices inv ON p.id = inv.project_id
-                LEFT JOIN expenses exp ON p.id = exp.project_id
-                GROUP BY p.id, p.project_code, p.name, p.estimated_budget, p.actual_cost, p.status
                 ORDER BY p.created_at DESC
             ")->fetchAll();
             
@@ -614,6 +613,7 @@ if (statusBreakdownCtx) {
                     <th>Actual Cost</th>
                     <th>Remaining</th>
                     <th>Status</th>
+                    <th>Client Quotations</th>
                     <th>Invoices</th>
                     <th>Expenses</th>
                 </tr>
@@ -627,6 +627,7 @@ if (statusBreakdownCtx) {
                     <td>₱<?php echo number_format($project['actual_cost'], 2); ?></td>
                     <td class="<?php echo $project['remaining_budget'] >= 0 ? 'progress-good' : 'progress-high'; ?>">₱<?php echo number_format($project['remaining_budget'], 2); ?></td>
                     <td><span class="badge badge-<?php echo $project['status']; ?>"><?php echo ucfirst($project['status']); ?></span></td>
+                    <td><?php echo (int) ($project['quote_count'] ?? 0); ?> (approved ₱<?php echo number_format($project['quote_pipeline'] ?? 0, 2); ?>)</td>
                     <td><?php echo $project['invoice_count']; ?> (₱<?php echo number_format($project['invoice_total'], 2); ?>)</td>
                     <td><?php echo $project['expense_count']; ?> (₱<?php echo number_format($project['expense_total'], 2); ?>)</td>
                 </tr>

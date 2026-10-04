@@ -1,6 +1,7 @@
 <?php
 require_once '../../config/database.php';
 require_once '../../includes/auth.php';
+require_once '../../includes/accounting_ledger.php';
 
 requireDepartment(['accounting']);
 
@@ -8,10 +9,15 @@ $page_title = 'Accounting Dashboard';
 
 $stats = [];
 try {
+    try {
+        syncDepartmentWorkflow($pdo);
+    } catch (Throwable $e) {
+        error_log('[Runeha ERP] purchase expense sync: ' . $e->getMessage());
+    }
     $stats['total_project_amount'] = $pdo->query("SELECT COALESCE(SUM(estimated_budget), 0) FROM projects")->fetchColumn() ?? 0;
-    $stats['total_project_expenses'] = $pdo->query("SELECT COALESCE(SUM(actual_cost), 0) FROM projects")->fetchColumn() ?? 0;
+    $stats['total_project_expenses'] = $pdo->query("SELECT COALESCE(SUM(amount), 0) FROM expenses WHERE status IN ('pending', 'paid')")->fetchColumn() ?? 0;
     $stats['total_invoices'] = $pdo->query("SELECT COUNT(*) FROM invoices")->fetchColumn() ?? 0;
-    $stats['total_expenses'] = $pdo->query("SELECT COALESCE(SUM(amount), 0) FROM expenses WHERE status = 'paid'")->fetchColumn() ?? 0;
+    $stats['total_expenses'] = $stats['total_project_expenses'];
     
     try {
         $stats['available_funds'] = $pdo->query("SELECT COALESCE(SUM(amount - allocated_amount), 0) FROM funds WHERE status = 'active'")->fetchColumn() ?? 0;
@@ -25,13 +31,27 @@ try {
         $stats['contracts'] = 0;
     }
     
+    $stats['purchase_costs'] = $pdo->query("SELECT COALESCE(SUM(amount), 0) FROM expenses WHERE purchase_order_id IS NOT NULL AND status IN ('pending', 'paid')")->fetchColumn() ?? 0;
+    $stats['active_projects'] = $pdo->query("SELECT COUNT(*) FROM projects WHERE status IN ('assigned', 'planning', 'ongoing')")->fetchColumn() ?? 0;
+    $stats['pending_expenses'] = $pdo->query("SELECT COUNT(*) FROM expenses WHERE status = 'pending'")->fetchColumn() ?? 0;
+    $stats['project_financials'] = $pdo->query("SELECT COUNT(*) FROM projects")->fetchColumn() ?? 0;
+    $stats['labor_budget'] = 0;
     try {
-        $stats['labor_budgets'] = $pdo->query("SELECT COUNT(*) FROM labor_budgets WHERE status = 'active'")->fetchColumn() ?? 0;
+        $stats['labor_budget'] = $pdo->query("SELECT COALESCE(SUM(allocated_amount), 0) FROM labor_budgets WHERE status = 'active'")->fetchColumn() ?? 0;
     } catch (PDOException $e) {
-        $stats['labor_budgets'] = 0;
+        $stats['labor_budget'] = 0;
     }
-    
-    $stats['purchase_costs'] = $pdo->query("SELECT COALESCE(SUM(total_amount), 0) FROM purchase_requests WHERE status IN ('approved', 'confirmed', 'ordered', 'received')")->fetchColumn() ?? 0;
+    $balances = ledgerAccountBalances();
+    $stats['ledger_ar'] = 0;
+    $stats['ledger_cash'] = 0;
+    foreach ($balances as $balance) {
+        if ($balance['code'] === RUNEHA_ACCT_AR) {
+            $stats['ledger_ar'] = $balance['balance'];
+        }
+        if ($balance['code'] === RUNEHA_ACCT_CASH) {
+            $stats['ledger_cash'] = $balance['balance'];
+        }
+    }
     
     $recent_financial_records = $pdo->query("
         (SELECT 'Invoice' as type, invoice_number as reference, amount, client as entity, status, created_at FROM invoices ORDER BY created_at DESC LIMIT 3)
@@ -53,12 +73,12 @@ include '../../includes/header.php';
         <div>
             <p class="dept-kicker">Accounting Department</p>
             <h1><i class="fas fa-chart-line"></i> Accounting Dashboard</h1>
-            <p class="dept-sub">Monitor project amounts, funds, invoices, and expenses.</p>
+            <p class="dept-sub">Project finances, budget against expenses, funds, and purchase costs.</p>
         </div>
         <div class="dept-actions">
-            <a href="invoices.php?action=add" class="btn btn-primary"><i class="fas fa-file-invoice-dollar"></i> New Invoice</a>
-            <a href="expenses.php?action=add" class="btn btn-outline"><i class="fas fa-receipt"></i> New Expense</a>
-            <a href="project_financials.php" class="btn btn-outline"><i class="fas fa-project-diagram"></i> Project Financials</a>
+            <a href="received_projects.php" class="btn btn-primary"><i class="fas fa-inbox"></i> Active Projects</a>
+            <a href="project_financials.php" class="btn btn-outline"><i class="fas fa-project-diagram"></i> Project Financial Setup</a>
+            <a href="financial_reports.php" class="btn btn-outline"><i class="fas fa-chart-bar"></i> Financial Reports</a>
         </div>
     </div>
 
@@ -67,13 +87,37 @@ include '../../includes/header.php';
     <?php endif; ?>
 
     <div class="dept-kpis">
-        <div class="dept-kpi blue"><div class="ico"><i class="fas fa-folder"></i></div><div><div class="num">₱<?php echo number_format((float) ($stats['total_project_amount'] ?? 0), 2); ?></div><div class="lbl">Total Project Amount</div></div></div>
-        <div class="dept-kpi red"><div class="ico"><i class="fas fa-receipt"></i></div><div><div class="num">₱<?php echo number_format((float) ($stats['total_project_expenses'] ?? 0), 2); ?></div><div class="lbl">Project Expenses</div></div></div>
-        <div class="dept-kpi green"><div class="ico"><i class="fas fa-wallet"></i></div><div><div class="num">₱<?php echo number_format((float) ($stats['available_funds'] ?? 0), 2); ?></div><div class="lbl">Available Funds</div></div></div>
-        <div class="dept-kpi teal"><div class="ico"><i class="fas fa-file-contract"></i></div><div><div class="num"><?php echo number_format($stats['contracts'] ?? 0); ?></div><div class="lbl">Active Contracts</div></div></div>
-        <div class="dept-kpi orange"><div class="ico"><i class="fas fa-users"></i></div><div><div class="num"><?php echo number_format($stats['labor_budgets'] ?? 0); ?></div><div class="lbl">Labor Budgets</div></div></div>
-        <div class="dept-kpi purple"><div class="ico"><i class="fas fa-shopping-cart"></i></div><div><div class="num">₱<?php echo number_format((float) ($stats['purchase_costs'] ?? 0), 2); ?></div><div class="lbl">Purchase Costs</div></div></div>
+        <a class="dept-kpi blue" href="project_financials.php"><div class="ico"><i class="fas fa-folder"></i></div><div><div class="num"><?php echo number_format($stats['project_financials'] ?? 0); ?></div><div class="lbl">Project Financial Summary</div></div></a>
+        <a class="dept-kpi red" href="expenses.php"><div class="ico"><i class="fas fa-receipt"></i></div><div><div class="num">₱<?php echo number_format((float) ($stats['total_project_amount'] ?? 0), 0); ?> / ₱<?php echo number_format((float) ($stats['total_project_expenses'] ?? 0), 0); ?></div><div class="lbl">Total Budget vs Expenses</div></div></a>
+        <a class="dept-kpi green" href="funds_budget.php"><div class="ico"><i class="fas fa-wallet"></i></div><div><div class="num">₱<?php echo number_format((float) ($stats['available_funds'] ?? 0), 2); ?></div><div class="lbl">Available Funds</div></div></a>
+        <a class="dept-kpi teal" href="received_projects.php"><div class="ico"><i class="fas fa-building"></i></div><div><div class="num"><?php echo number_format($stats['active_projects'] ?? 0); ?></div><div class="lbl">Active Projects</div></div></a>
+        <a class="dept-kpi orange" href="expenses.php"><div class="ico"><i class="fas fa-clock"></i></div><div><div class="num"><?php echo number_format($stats['pending_expenses'] ?? 0); ?></div><div class="lbl">Pending Expense Records</div></div></a>
+        <a class="dept-kpi purple" href="purchase_costs.php"><div class="ico"><i class="fas fa-shopping-cart"></i></div><div><div class="num">₱<?php echo number_format((float) ($stats['purchase_costs'] ?? 0) + (float) ($stats['labor_budget'] ?? 0), 0); ?></div><div class="lbl">Purchase Costs & Labor</div></div></a>
     </div>
+
+    <div class="card">
+        <h3><i class="fas fa-chart-bar"></i> Budget, expenses, and labor</h3>
+        <canvas id="acctChart" height="80"></canvas>
+    </div>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+    <script>
+    new Chart(document.getElementById('acctChart'), {
+        type: 'bar',
+        data: {
+            labels: ['Project budget', 'Expenses', 'Available funds', 'Labor'],
+            datasets: [{
+                data: [
+                    <?php echo json_encode((float) ($stats['total_project_amount'] ?? 0)); ?>,
+                    <?php echo json_encode((float) ($stats['total_project_expenses'] ?? 0)); ?>,
+                    <?php echo json_encode((float) ($stats['available_funds'] ?? 0)); ?>,
+                    <?php echo json_encode((float) ($stats['labor_budget'] ?? 0)); ?>
+                ],
+                backgroundColor: ['#4e73df', '#e74a3b', '#1cc88a', '#f6c23e']
+            }]
+        },
+        options: { plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true } } }
+    });
+    </script>
 
     <div class="dept-grid">
         <div class="dept-panel">
@@ -103,9 +147,12 @@ include '../../includes/header.php';
         <div class="dept-panel">
             <h3><i class="fas fa-bolt"></i> Quick Actions</h3>
             <div class="dept-qa">
-                <a class="t1" href="invoices.php"><i class="fas fa-file-invoice-dollar"></i>Invoices</a>
-                <a class="t2" href="expenses.php"><i class="fas fa-coins"></i>Expenses</a>
-                <a class="t3" href="assign_in_charge.php"><i class="fas fa-user-tie"></i>Assign In-Charge</a>
+                <a class="t1" href="project_financials.php"><i class="fas fa-project-diagram"></i>Project Financial Setup</a>
+                <a class="t2" href="contracts.php"><i class="fas fa-file-contract"></i>Contract / Project Amount</a>
+                <a class="t3" href="labor_budget.php"><i class="fas fa-users"></i>Labor / Salary Budget</a>
+                <a class="t2" href="expenses.php"><i class="fas fa-coins"></i>Expense Management</a>
+                <a class="t4" href="funds_budget.php"><i class="fas fa-wallet"></i>Funds Monitoring</a>
+                <a class="t3" href="assign_in_charge.php"><i class="fas fa-user-tie"></i>Project In-Charge Assignment</a>
                 <a class="t4" href="financial_reports.php"><i class="fas fa-chart-bar"></i>Financial Reports</a>
             </div>
         </div>

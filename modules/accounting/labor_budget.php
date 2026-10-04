@@ -4,6 +4,44 @@ require_once '../../includes/auth.php';
 
 requireDepartment(['accounting']);
 
+function laborRoleCatalog(): array
+{
+    return [
+        'engineer' => 'Engineer',
+        'architect' => 'Architect',
+        'foreman' => 'Foreman',
+        'skilled' => 'Skilled Workers',
+        'helper' => 'Construction Helpers',
+        'other' => 'Other Personnel',
+    ];
+}
+
+function laborSaveLines(PDO $pdo, int $budgetId, array $lines): void
+{
+    $pdo->prepare("DELETE FROM labor_budget_lines WHERE labor_budget_id = ?")->execute([$budgetId]);
+    $stmt = $pdo->prepare("INSERT INTO labor_budget_lines (labor_budget_id, role_key, role_name, headcount, wage, assigned_count, line_total) VALUES (?, ?, ?, ?, ?, ?, ?)");
+    foreach ($lines as $line) {
+        $stmt->execute([$budgetId, $line['role_key'], $line['role_name'], $line['headcount'], $line['wage'], $line['assigned_count'], $line['line_total']]);
+    }
+}
+
+function laborFundMessage(PDO $pdo, int $projectId, float $payroll, float $laborLimit, bool $updated): string
+{
+    $fundStmt = $pdo->prepare("SELECT fund_name, amount, allocated_amount FROM funds WHERE project_id = ? AND status = 'active' ORDER BY id DESC LIMIT 1");
+    $fundStmt->execute([$projectId]);
+    $fund = $fundStmt->fetch();
+    $base = $updated ? 'Labor budget updated.' : 'Labor budget created.';
+    if (!$fund) {
+        return $base . ' Gumawa ng fund sa Funds & Budget Management para makonekta ang pasahod.';
+    }
+    $available = (float) $fund['amount'] - (float) $fund['allocated_amount'];
+    $text = $base . ' Na-allocate ang ₱' . number_format($payroll, 2) . ' sa fund na ' . $fund['fund_name'] . '. Available funds: ₱' . number_format($available, 2) . '.';
+    if ($payroll > $laborLimit) {
+        $text .= ' Lampas ng ₱' . number_format($payroll - $laborLimit, 2) . ' sa labor cost ng quotation. Kailangan ng additional payment sa client.';
+    }
+    return $text;
+}
+
 $page_title = 'Labor/Salary Budget';
 $action = $_GET['action'] ?? 'list';
 $id = (int)($_GET['id'] ?? 0);
@@ -19,38 +57,96 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (isset($_POST['add_budget']) || isset($_POST['update_budget'])) {
         $budget_name = trim($_POST['budget_name'] ?? '');
         $project_id = (int)($_POST['project_id'] ?? 0);
-        $user_id = (int)($_POST['user_id'] ?? 0);
-        $position = trim($_POST['position'] ?? '');
-        $allocated_amount = (float)($_POST['allocated_amount'] ?? 0);
         $period_start = $_POST['period_start'] ?? null;
         $period_end = $_POST['period_end'] ?? null;
         $description = trim($_POST['description'] ?? '');
         $status = $_POST['status'] ?? 'active';
-        
+        $roles = laborRoleCatalog();
+        $lines = [];
         $errors = [];
         if (empty($budget_name)) $errors[] = 'Budget name is required.';
-        if ($allocated_amount <= 0) $errors[] = 'Allocated amount must be greater than 0.';
+        foreach ($roles as $key => $label) {
+            $row = $_POST['crew'][$key] ?? [];
+            $headcount = max(0, (int) ($row['headcount'] ?? 0));
+            $wage = max(0, (float) ($row['wage'] ?? 0));
+            $assigned = max(0, (int) ($row['assigned'] ?? 0));
+            $roleName = $key === 'other' ? trim((string) ($row['name'] ?? '')) : $label;
+            if ($headcount === 0 && $wage <= 0 && $assigned === 0) {
+                continue;
+            }
+            if ($key === 'other' && $roleName === '') {
+                $roleName = 'Other Personnel';
+            }
+            if ($headcount <= 0) {
+                $errors[] = $label . ': enter how many to hire.';
+            }
+            if ($wage <= 0) {
+                $errors[] = $label . ': enter the wage.';
+            }
+            if ($assigned <= 0) {
+                $errors[] = $label . ': enter how many to assign.';
+            } elseif ($assigned > $headcount) {
+                $errors[] = $label . ': assigned cannot be more than the number to hire.';
+            }
+            $lines[] = [
+                'role_key' => $key,
+                'role_name' => $roleName,
+                'headcount' => $headcount,
+                'wage' => round($wage, 2),
+                'assigned_count' => $assigned,
+                'line_total' => round($assigned * $wage, 2),
+            ];
+        }
+        $payroll_total = round(array_sum(array_column($lines, 'line_total')), 2);
+        $allocated_amount = 0.0;
+        if ($project_id <= 0) {
+            $errors[] = 'Select the project so the allocated amount comes from the quotation.';
+        } else {
+            $laborStmt = $pdo->prepare("SELECT labor_cost FROM projects WHERE id = ?");
+            $laborStmt->execute([$project_id]);
+            $allocated_amount = round((float) $laborStmt->fetchColumn(), 2);
+            if ($allocated_amount <= 0) {
+                $errors[] = 'This project quotation has no labor cost yet. Re-attach the quotation on the project first.';
+            }
+        }
+        if ($payroll_total <= 0) {
+            $errors[] = 'Enter at least one role with a wage and how many to assign.';
+        }
+        $position = implode(', ', array_map(static function ($line) {
+            return $line['role_name'] . ' x' . $line['assigned_count'];
+        }, $lines));
         
         if (empty($errors)) {
             try {
                 if (isset($_POST['add_budget'])) {
-                    $stmt = $pdo->prepare("INSERT INTO labor_budgets (budget_name, project_id, user_id, position, allocated_amount, period_start, period_end, description, status, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-                    $stmt->execute([$budget_name, $project_id, $user_id, $position, $allocated_amount, $period_start, $period_end, $description, $status, $_SESSION['user_id']]);
-                    
+                    $stmt = $pdo->prepare("INSERT INTO labor_budgets (budget_name, project_id, user_id, position, allocated_amount, used_amount, period_start, period_end, description, status, created_by) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)");
+                    $stmt->execute([$budget_name, $project_id ?: null, $position, $allocated_amount, $payroll_total, $period_start ?: null, $period_end ?: null, $description, $status, $_SESSION['user_id']]);
+                    $budgetId = (int) $pdo->lastInsertId();
+                    laborSaveLines($pdo, $budgetId, $lines);
+                    syncProjectFundsFromLabor($pdo, $project_id);
                     logActivity($_SESSION['user_id'], 'Created labor budget', 'Accounting', "Budget: $budget_name");
-                    $_SESSION['success'] = "Labor budget created successfully!";
+                    $_SESSION['success'] = laborFundMessage($pdo, $project_id, $payroll_total, $allocated_amount, false);
                 } else {
-                    $stmt = $pdo->prepare("UPDATE labor_budgets SET budget_name = ?, project_id = ?, user_id = ?, position = ?, allocated_amount = ?, period_start = ?, period_end = ?, description = ?, status = ? WHERE id = ?");
-                    $stmt->execute([$budget_name, $project_id, $user_id, $position, $allocated_amount, $period_start, $period_end, $description, $status, $id]);
-                    
+                    $oldProjectStmt = $pdo->prepare("SELECT project_id FROM labor_budgets WHERE id = ?");
+                    $oldProjectStmt->execute([$id]);
+                    $oldProjectId = (int) $oldProjectStmt->fetchColumn();
+                    $stmt = $pdo->prepare("UPDATE labor_budgets SET budget_name = ?, project_id = ?, position = ?, allocated_amount = ?, used_amount = ?, period_start = ?, period_end = ?, description = ?, status = ? WHERE id = ?");
+                    $stmt->execute([$budget_name, $project_id ?: null, $position, $allocated_amount, $payroll_total, $period_start ?: null, $period_end ?: null, $description, $status, $id]);
+                    laborSaveLines($pdo, $id, $lines);
+                    syncProjectFundsFromLabor($pdo, $project_id);
+                    if ($oldProjectId > 0 && $oldProjectId !== $project_id) {
+                        syncProjectFundsFromLabor($pdo, $oldProjectId);
+                    }
                     logActivity($_SESSION['user_id'], 'Updated labor budget', 'Accounting', "Budget: $budget_name");
-                    $_SESSION['success'] = "Labor budget updated successfully!";
+                    $_SESSION['success'] = laborFundMessage($pdo, $project_id, $payroll_total, $allocated_amount, true);
                 }
                 header('Location: labor_budget.php');
                 exit();
             } catch (PDOException $e) {
                 $error = userDatabaseError($e);
             }
+        } else {
+            $error = implode(' ', $errors);
         }
     }
 }
@@ -64,8 +160,14 @@ if (isset($_GET['delete_id']) && $action === 'delete') {
     }
     $delete_id = (int)$_GET['delete_id'];
     try {
+        $projectStmt = $pdo->prepare("SELECT project_id FROM labor_budgets WHERE id = ?");
+        $projectStmt->execute([$delete_id]);
+        $deletedProjectId = (int) $projectStmt->fetchColumn();
         $stmt = $pdo->prepare("DELETE FROM labor_budgets WHERE id = ?");
         $stmt->execute([$delete_id]);
+        if ($deletedProjectId > 0) {
+            syncProjectFundsFromLabor($pdo, $deletedProjectId);
+        }
         $_SESSION['success'] = "Labor budget deleted successfully!";
         header('Location: labor_budget.php');
         exit();
@@ -105,27 +207,71 @@ try {
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     ");
 }
+try {
+    $pdo->exec("CREATE TABLE IF NOT EXISTS labor_budget_lines (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        labor_budget_id BIGINT UNSIGNED NOT NULL,
+        role_key VARCHAR(40) NOT NULL,
+        role_name VARCHAR(150) NOT NULL,
+        headcount INT UNSIGNED NOT NULL DEFAULT 0,
+        wage DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+        assigned_count INT UNSIGNED NOT NULL DEFAULT 0,
+        line_total DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+        PRIMARY KEY (id),
+        KEY idx_lbl_budget (labor_budget_id),
+        CONSTRAINT fk_lbl_budget FOREIGN KEY (labor_budget_id) REFERENCES labor_budgets (id) ON DELETE CASCADE ON UPDATE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+} catch (PDOException $e) {
+    error_log('[Runeha ERP] labor_budget_lines: ' . $e->getMessage());
+}
 
 // Get labor budgets
 $labor_budgets = [];
 try {
     $query = "
-        SELECT lb.*, p.project_code, p.name as project_name, u.full_name as user_name, u.department as user_department, 
-               (lb.allocated_amount - lb.used_amount) as remaining_amount,
+        SELECT lb.*, p.project_code, p.name as project_name, u.full_name as user_name, u.department as user_department,
+               COALESCE(wages.planned_wages, 0) AS planned_wages,
                ub.full_name as created_by_name
         FROM labor_budgets lb
         LEFT JOIN projects p ON lb.project_id = p.id
         LEFT JOIN users u ON lb.user_id = u.id
         LEFT JOIN users ub ON lb.created_by = ub.id
+        LEFT JOIN (
+            SELECT labor_budget_id, COALESCE(SUM(line_total), 0) AS planned_wages
+            FROM labor_budget_lines
+            GROUP BY labor_budget_id
+        ) wages ON wages.labor_budget_id = lb.id
         ORDER BY lb.created_at DESC
     ";
     $labor_budgets = $pdo->query($query)->fetchAll();
+    foreach ($labor_budgets as &$budgetRow) {
+        $planned = (float) ($budgetRow['planned_wages'] ?? 0);
+        $budgetRow['used_amount'] = $planned;
+        $budgetRow['remaining_amount'] = (float) $budgetRow['allocated_amount'] - $planned;
+    }
+    unset($budgetRow);
 } catch (PDOException $e) {
     $error = userDatabaseError($e);
 }
 
 // Get projects for dropdown
-$projects = $pdo->query("SELECT id, project_code, name FROM projects WHERE status != 'completed' ORDER BY name")->fetchAll();
+$projects = $pdo->query("SELECT id, project_code, name, labor_cost, material_cost, estimated_budget FROM projects WHERE status != 'completed' ORDER BY name")->fetchAll();
+$project_funds = [];
+try {
+    foreach ($pdo->query("SELECT id, fund_name, amount, project_id FROM funds WHERE status = 'active' AND project_id IS NOT NULL ORDER BY id") as $fundRow) {
+        $project_funds[(int) $fundRow['project_id']] = $fundRow;
+    }
+} catch (PDOException $e) {
+    $project_funds = [];
+}
+$prefill_project = (int) ($_GET['project'] ?? 0);
+$from_project = null;
+foreach ($projects as $project) {
+    if ((int) $project['id'] === $prefill_project) {
+        $from_project = $project;
+        break;
+    }
+}
 
 // Get users for dropdown
 $users = $pdo->query("SELECT id, full_name, department FROM users WHERE status = 'active' ORDER BY full_name")->fetchAll();
@@ -134,7 +280,7 @@ $users = $pdo->query("SELECT id, full_name, department FROM users WHERE status =
 $budget_details = null;
 if ($action === 'edit' || $action === 'view') {
     $stmt = $pdo->prepare("
-        SELECT lb.*, p.project_code, p.name as project_name, u.full_name as user_name, u.department as user_department,
+        SELECT lb.*, p.project_code, p.name as project_name, p.labor_cost as quotation_labor, u.full_name as user_name, u.department as user_department,
                (lb.allocated_amount - lb.used_amount) as remaining_amount,
                ub.full_name as created_by_name
         FROM labor_budgets lb
@@ -151,6 +297,19 @@ if ($action === 'edit' || $action === 'view') {
         exit();
     }
 }
+$crew_lines = [];
+if ($id > 0) {
+    try {
+        $lineStmt = $pdo->prepare("SELECT * FROM labor_budget_lines WHERE labor_budget_id = ?");
+        $lineStmt->execute([$id]);
+        foreach ($lineStmt->fetchAll() as $line) {
+            $crew_lines[$line['role_key']] = $line;
+        }
+    } catch (PDOException $e) {
+        $crew_lines = [];
+    }
+}
+$quote_labor = (float) (is_array($budget_details) ? ($budget_details['quotation_labor'] ?? 0) : ($from_project['labor_cost'] ?? 0));
 
 if (($action === 'add' || $action === 'edit') && !canWriteDepartmentData('accounting')) {
     $_SESSION['error'] = 'Administrators have view-only access.';
@@ -204,16 +363,40 @@ include '../../includes/header.php';
     <div class="card" style="border-left-color:#1cc88a;margin:0;">
         <div style="font-size:0.75rem;color:#64748b;">Total Allocated</div>
         <div class="stat-amount">₱<?php echo number_format(array_sum(array_column($labor_budgets, 'allocated_amount')), 2); ?></div>
+        <div style="font-size:0.7rem;color:#94a3b8;">Quotation labor</div>
     </div>
     <div class="card" style="border-left-color:#f6c23e;margin:0;">
-        <div style="font-size:0.75rem;color:#64748b;">Total Used</div>
+        <div style="font-size:0.75rem;color:#64748b;">Planned Wages</div>
         <div class="stat-amount">₱<?php echo number_format(array_sum(array_column($labor_budgets, 'used_amount')), 2); ?></div>
+        <div style="font-size:0.7rem;color:#94a3b8;">Assigned × wage</div>
     </div>
     <div class="card" style="border-left-color:#36b9cc;margin:0;">
         <div style="font-size:0.75rem;color:#64748b;">Total Remaining</div>
         <div class="stat-amount">₱<?php echo number_format(array_sum(array_column($labor_budgets, 'remaining_amount')), 2); ?></div>
+        <div style="font-size:0.7rem;color:#94a3b8;">Quotation labor minus planned wages</div>
     </div>
 </div>
+
+<?php if ($action === 'list'): ?>
+<div class="card">
+    <h3><i class="fas fa-chart-bar"></i> Labor / Salary Budget</h3>
+    <canvas id="laborChart" height="90"></canvas>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<script>
+new Chart(document.getElementById('laborChart'), {
+    type: 'bar',
+    data: {
+        labels: <?php echo json_encode(array_map(static fn($b) => $b['budget_name'], array_slice($labor_budgets, 0, 8))); ?>,
+        datasets: [
+            { label: 'Allocated', data: <?php echo json_encode(array_map(static fn($b) => (float) $b['allocated_amount'], array_slice($labor_budgets, 0, 8))); ?>, backgroundColor: '#4e73df' },
+            { label: 'Planned wages', data: <?php echo json_encode(array_map(static fn($b) => (float) $b['used_amount'], array_slice($labor_budgets, 0, 8))); ?>, backgroundColor: '#f6c23e' }
+        ]
+    },
+    options: { scales: { y: { beginAtZero: true } } }
+});
+</script>
+<?php endif; ?>
 
 <?php if ($action === 'add' || $action === 'edit'): ?>
 <!-- Add/Edit Form -->
@@ -229,44 +412,77 @@ include '../../includes/header.php';
         <div class="form-row">
             <div class="form-group">
                 <label class="required">Budget Name</label>
-                <input type="text" name="budget_name" required value="<?php echo htmlspecialchars($budget_details['budget_name'] ?? ''); ?>" placeholder="Enter budget name">
+                <input type="text" name="budget_name" required value="<?php echo htmlspecialchars($budget_details['budget_name'] ?? ($from_project ? ($from_project['name'] . ' labor') : '')); ?>" placeholder="Enter budget name">
             </div>
             <div class="form-group">
                 <label>Project (Optional)</label>
-                <select name="project_id">
+                <select name="project_id" id="laborProject">
                     <option value="">No Project</option>
                     <?php foreach ($projects as $project): ?>
-                        <option value="<?php echo $project['id']; ?>" <?php echo ($budget_details['project_id'] ?? 0) == $project['id'] ? 'selected' : ''; ?>>
+                        <option value="<?php echo $project['id']; ?>"
+                            data-labor="<?php echo htmlspecialchars($project['labor_cost'] ?? 0); ?>"
+                            data-name="<?php echo htmlspecialchars($project['name'] ?? ''); ?>"
+                            data-fund="<?php echo htmlspecialchars($project_funds[(int) $project['id']]['fund_name'] ?? ''); ?>"
+                            data-fund-amount="<?php echo htmlspecialchars($project_funds[(int) $project['id']]['amount'] ?? 0); ?>"
+                            data-fund-id="<?php echo (int) ($project_funds[(int) $project['id']]['id'] ?? 0); ?>"
+                            <?php echo (int) ($budget_details['project_id'] ?? $prefill_project) === (int) $project['id'] ? 'selected' : ''; ?>>
                             <?php echo htmlspecialchars($project['project_code'] . ' - ' . $project['name']); ?>
                         </option>
                     <?php endforeach; ?>
                 </select>
+                <small>Labor cost comes from the quotation attached by Executive Admin.</small>
+                <small id="laborFundNote" style="display:block;margin-top:0.35rem;"></small>
             </div>
         </div>
-        
-        <div class="form-row">
-            <div class="form-group">
-                <label>Employee (Optional)</label>
-                <select name="user_id">
-                    <option value="">No Specific Employee</option>
-                    <?php foreach ($users as $user): ?>
-                        <option value="<?php echo $user['id']; ?>" <?php echo ($budget_details['user_id'] ?? 0) == $user['id'] ? 'selected' : ''; ?>>
-                            <?php echo htmlspecialchars($user['full_name'] . ' - ' . ucfirst($user['department'])); ?>
-                        </option>
+
+        <h4 style="margin:1rem 0 0.5rem;">Personnel wages</h4>
+        <p style="color:#64748b;margin-top:0;">Ilagay kung ilan ang kukunin, magkano ang pasahod, at ilan ang ia-assign. Ang planned wages ang Allocated Amount sa Funds &amp; Budget Management.</p>
+        <div class="table-responsive">
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th>Role</th>
+                        <th>To hire</th>
+                        <th>Wage (₱)</th>
+                        <th>To assign</th>
+                        <th>Amount</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <?php foreach (laborRoleCatalog() as $key => $label):
+                        $saved = $crew_lines[$key] ?? [];
+                    ?>
+                    <tr class="crew-row">
+                        <td>
+                            <?php if ($key === 'other'): ?>
+                                <input type="text" name="crew[other][name]" value="<?php echo htmlspecialchars($saved['role_name'] ?? ''); ?>" placeholder="Other personnel">
+                            <?php else: ?>
+                                <strong><?php echo htmlspecialchars($label); ?></strong>
+                            <?php endif; ?>
+                        </td>
+                        <td><input type="number" min="0" step="1" name="crew[<?php echo $key; ?>][headcount]" data-field="headcount" value="<?php echo (int) ($saved['headcount'] ?? 0); ?>" style="width:90px;"></td>
+                        <td><input type="number" min="0" step="0.01" name="crew[<?php echo $key; ?>][wage]" data-field="wage" value="<?php echo htmlspecialchars($saved['wage'] ?? 0); ?>" style="width:120px;"></td>
+                        <td><input type="number" min="0" step="1" name="crew[<?php echo $key; ?>][assigned]" data-field="assigned" value="<?php echo (int) ($saved['assigned_count'] ?? 0); ?>" style="width:90px;"></td>
+                        <td class="line-total">₱<?php echo number_format((float) ($saved['line_total'] ?? 0), 2); ?></td>
+                    </tr>
                     <?php endforeach; ?>
-                </select>
+                </tbody>
+            </table>
+        </div>
+        <div class="form-row">
+            <div class="form-group">
+                <label>Allocated Amount (₱)</label>
+                <input type="number" step="0.01" id="allocatedAmount" name="allocated_amount" readonly value="<?php echo htmlspecialchars($quote_labor); ?>" style="background:#eff6ff;font-weight:700;color:#1d4ed8;">
+                <small>Automatic mula sa labor cost ng quotation. Ito ang limit ng pasahod.</small>
             </div>
             <div class="form-group">
-                <label>Position</label>
-                <input type="text" name="position" value="<?php echo htmlspecialchars($budget_details['position'] ?? ''); ?>" placeholder="Job position">
+                <label>Planned wages (₱)</label>
+                <input type="text" id="plannedWages" readonly value="0.00" style="background:#f8fafc;font-weight:700;">
+                <small id="laborLimitNote">Ihambing ito sa Allocated Amount.</small>
             </div>
         </div>
         
         <div class="form-row">
-            <div class="form-group">
-                <label class="required">Allocated Amount (₱)</label>
-                <input type="number" step="0.01" name="allocated_amount" required value="<?php echo htmlspecialchars($budget_details['allocated_amount'] ?? 0); ?>" min="0" placeholder="0.00">
-            </div>
             <div class="form-group">
                 <label>Period Start</label>
                 <input type="date" name="period_start" value="<?php echo htmlspecialchars($budget_details['period_start'] ?? ''); ?>">
@@ -307,11 +523,43 @@ include '../../includes/header.php';
     <div class="view-details">
         <div class="detail-row"><span>Budget Name:</span> <strong><?php echo htmlspecialchars($budget_details['budget_name']); ?></strong></div>
         <div class="detail-row"><span>Project:</span> <?php echo htmlspecialchars($budget_details['project_name'] ?? 'N/A'); ?></div>
-        <div class="detail-row"><span>Employee:</span> <?php echo htmlspecialchars($budget_details['user_name'] ?? 'N/A'); ?></div>
-        <div class="detail-row"><span>Position:</span> <?php echo htmlspecialchars($budget_details['position'] ?? 'N/A'); ?></div>
-        <div class="detail-row"><span>Allocated Amount:</span> <strong>₱<?php echo number_format($budget_details['allocated_amount'], 2); ?></strong></div>
-        <div class="detail-row"><span>Used Amount:</span> <strong class="budget-used">₱<?php echo number_format($budget_details['used_amount'], 2); ?></strong></div>
-        <div class="detail-row"><span>Remaining:</span> <strong class="<?php echo $budget_details['remaining_amount'] >= 0 ? 'budget-remaining' : 'budget-over'; ?>">₱<?php echo number_format($budget_details['remaining_amount'], 2); ?></strong></div>
+        <?php $viewFund = $project_funds[(int) ($budget_details['project_id'] ?? 0)] ?? null; ?>
+        <?php if ($viewFund): ?>
+        <div class="detail-row"><span>Fund:</span> <a href="funds_budget.php?action=view&id=<?php echo (int) $viewFund['id']; ?>"><?php echo htmlspecialchars($viewFund['fund_name']); ?></a></div>
+        <?php endif; ?>
+        <div class="detail-row"><span>Personnel:</span> <?php echo htmlspecialchars($budget_details['position'] ?? 'N/A'); ?></div>
+        <div class="detail-row"><span>Allocated Amount:</span> <strong>₱<?php echo number_format((float) ($budget_details['quotation_labor'] ?? $budget_details['allocated_amount']), 2); ?></strong></div>
+        <?php
+            $plannedWages = 0.0;
+            foreach ($crew_lines as $line) {
+                $plannedWages += (float) $line['line_total'];
+            }
+            $laborLimit = (float) ($budget_details['quotation_labor'] ?? $budget_details['allocated_amount']);
+            $laborGap = $plannedWages - $laborLimit;
+        ?>
+        <?php if ($crew_lines): ?>
+        <?php if ($laborGap > 0): ?>
+        <div class="alert alert-danger">Planned wages exceed the quotation by ₱<?php echo number_format($laborGap, 2); ?>. Request additional payment from the client.</div>
+        <?php endif; ?>
+        <div class="table-responsive" style="margin-top:1rem;">
+            <table class="table">
+                <thead><tr><th>Role</th><th>To hire</th><th>Wage</th><th>To assign</th><th>Amount</th></tr></thead>
+                <tbody>
+                    <?php foreach ($crew_lines as $line): ?>
+                    <tr>
+                        <td><?php echo htmlspecialchars($line['role_name']); ?></td>
+                        <td><?php echo (int) $line['headcount']; ?></td>
+                        <td>₱<?php echo number_format((float) $line['wage'], 2); ?></td>
+                        <td><?php echo (int) $line['assigned_count']; ?></td>
+                        <td>₱<?php echo number_format((float) $line['line_total'], 2); ?></td>
+                    </tr>
+                    <?php endforeach; ?>
+                </tbody>
+            </table>
+        </div>
+        <?php endif; ?>
+        <div class="detail-row"><span>Planned wages:</span> <strong class="budget-used">₱<?php echo number_format($plannedWages, 2); ?></strong></div>
+        <div class="detail-row"><span>Remaining:</span> <strong class="<?php echo ($laborLimit - $plannedWages) >= 0 ? 'budget-remaining' : 'budget-over'; ?>">₱<?php echo number_format($laborLimit - $plannedWages, 2); ?></strong></div>
         <div class="detail-row"><span>Period Start:</span> <?php echo $budget_details['period_start'] ? date('M d, Y', strtotime($budget_details['period_start'])) : 'N/A'; ?></div>
         <div class="detail-row"><span>Period End:</span> <?php echo $budget_details['period_end'] ? date('M d, Y', strtotime($budget_details['period_end'])) : 'N/A'; ?></div>
         <div class="detail-row"><span>Description:</span> <?php echo nl2br(htmlspecialchars($budget_details['description'] ?? '')); ?></div>
@@ -350,7 +598,7 @@ include '../../includes/header.php';
                     <th onclick="sortTable('budgetTable', 2)" style="cursor:pointer;">Employee <i class="fas fa-sort"></i></th>
                     <th onclick="sortTable('budgetTable', 3)" style="cursor:pointer;">Position <i class="fas fa-sort"></i></th>
                     <th onclick="sortTable('budgetTable', 4)" style="cursor:pointer;">Allocated <i class="fas fa-sort"></i></th>
-                    <th onclick="sortTable('budgetTable', 5)" style="cursor:pointer;">Used <i class="fas fa-sort"></i></th>
+                    <th onclick="sortTable('budgetTable', 5)" style="cursor:pointer;">Planned Wages <i class="fas fa-sort"></i></th>
                     <th onclick="sortTable('budgetTable', 6)" style="cursor:pointer;">Remaining <i class="fas fa-sort"></i></th>
                     <th onclick="sortTable('budgetTable', 7)" style="cursor:pointer;">Status <i class="fas fa-sort"></i></th>
                     <th>Actions</th>
@@ -422,3 +670,72 @@ document.getElementById('filterStatus')?.addEventListener('change', function() {
 <?php endif; ?>
 
 <?php include '../../includes/footer.php'; ?>
+<script>
+document.getElementById('laborProject')?.addEventListener('change', function () {
+    const option = this.selectedOptions[0];
+    const amount = document.getElementById('allocatedAmount');
+    const note = document.getElementById('laborFundNote');
+    if (!option || !option.value) {
+        if (amount) amount.value = '0.00';
+        if (note) note.textContent = '';
+        refreshLaborTotal();
+        return;
+    }
+    if (option.dataset.name && !this.form.elements.budget_name.value) {
+        this.form.elements.budget_name.value = option.dataset.name + ' labor';
+    }
+    if (amount) amount.value = Number(option.dataset.labor || 0).toFixed(2);
+    if (note) {
+        const money = (value) => '₱' + Number(value || 0).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+        note.textContent = '';
+        if (option.dataset.fundId && option.dataset.fundId !== '0') {
+            note.append('Connected sa fund na ');
+            const link = document.createElement('a');
+            link.href = 'funds_budget.php?action=view&id=' + option.dataset.fundId;
+            link.textContent = option.dataset.fund || 'fund';
+            note.append(link);
+            note.append('. Total ' + money(option.dataset.fundAmount) + '. Ang planned wages ang magiging Allocated Amount nito.');
+        } else {
+            note.append('Walang fund pa para sa project na ito. ');
+            const link = document.createElement('a');
+            link.href = 'funds_budget.php?action=add&project=' + option.value;
+            link.textContent = 'Gumawa ng fund';
+            note.append(link);
+            note.append(' para makonekta ang pasahod.');
+        }
+    }
+    refreshLaborTotal();
+});
+if (document.getElementById('laborProject')?.value) {
+    document.getElementById('laborProject').dispatchEvent(new Event('change'));
+}
+function refreshLaborTotal() {
+    let total = 0;
+    document.querySelectorAll('.crew-row').forEach((row) => {
+        const wage = parseFloat(row.querySelector('[data-field="wage"]').value) || 0;
+        const assigned = parseInt(row.querySelector('[data-field="assigned"]').value, 10) || 0;
+        const line = wage * assigned;
+        total += line;
+        const cell = row.querySelector('.line-total');
+        if (cell) cell.textContent = '₱' + line.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+    });
+    const planned = document.getElementById('plannedWages');
+    const amount = document.getElementById('allocatedAmount');
+    const note = document.getElementById('laborLimitNote');
+    if (planned) planned.value = total.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+    const limit = amount ? (parseFloat(amount.value) || 0) : 0;
+    if (!note) return;
+    if (limit <= 0) {
+        note.textContent = 'Walang labor cost sa quotation ng project.';
+        note.style.color = '#b45309';
+    } else if (total > limit) {
+        note.textContent = 'Lampas ng ₱' + (total - limit).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2}) + '. Kailangan ng additional payment sa client.';
+        note.style.color = '#e74a3b';
+    } else {
+        note.textContent = 'Pasok sa quotation. Natitira: ₱' + (limit - total).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2}) + '.';
+        note.style.color = '#047857';
+    }
+}
+document.querySelectorAll('.crew-row input').forEach((input) => input.addEventListener('input', refreshLaborTotal));
+refreshLaborTotal();
+</script>

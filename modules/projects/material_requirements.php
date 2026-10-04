@@ -50,14 +50,14 @@ try {
     // Low stock materials that need procurement
     $low_stock_materials = $pdo->query("
         SELECT m.id, m.material_code, m.name, m.unit, m.current_stock, m.min_stock, m.max_stock, m.cost_per_unit,
-               s.name as supplier_name, s.phone as supplier_phone, s.email as supplier_email,
+               COALESCE(NULLIF(s.name, ''), NULLIF(m.supplier, '')) as supplier_name, s.phone as supplier_phone, s.email as supplier_email,
                COUNT(DISTINCT pr.id) as pending_pr_count
         FROM materials m
         LEFT JOIN suppliers s ON m.supplier_id = s.id
         LEFT JOIN purchase_request_items pri ON m.id = pri.material_id
         LEFT JOIN purchase_requests pr ON pri.purchase_request_id = pr.id AND pr.status IN ('pending', 'approved', 'confirmed')
         WHERE m.status = 'active' AND m.current_stock <= m.min_stock AND m.min_stock > 0
-        GROUP BY m.id, m.material_code, m.name, m.unit, m.current_stock, m.min_stock, m.max_stock, m.cost_per_unit, s.name, s.phone, s.email
+        GROUP BY m.id, m.material_code, m.name, m.unit, m.current_stock, m.min_stock, m.max_stock, m.cost_per_unit, s.name, s.phone, s.email, m.supplier
         ORDER BY m.current_stock ASC
     ")->fetchAll();
     
@@ -65,7 +65,7 @@ try {
     if ($project_id > 0) {
         $stmt = $pdo->prepare("
             SELECT m.id, m.material_code, m.name, m.unit, m.current_stock, m.min_stock, m.max_stock, m.cost_per_unit, m.category,
-                   s.name as supplier_name,
+                   COALESCE(NULLIF(s.name, ''), NULLIF(m.supplier, '')) as supplier_name,
                    COALESCE(SUM(pri.quantity), 0) as required_quantity,
                    COUNT(DISTINCT pr.id) as pr_count
             FROM materials m
@@ -73,7 +73,7 @@ try {
             LEFT JOIN purchase_request_items pri ON m.id = pri.material_id
             LEFT JOIN purchase_requests pr ON pri.purchase_request_id = pr.id AND pr.project_id = ?
             WHERE m.status = 'active'
-            GROUP BY m.id, m.material_code, m.name, m.unit, m.current_stock, m.min_stock, m.max_stock, m.cost_per_unit, m.category, s.name
+            GROUP BY m.id, m.material_code, m.name, m.unit, m.current_stock, m.min_stock, m.max_stock, m.cost_per_unit, m.category, s.name, m.supplier
             HAVING COALESCE(SUM(pri.quantity), 0) > 0
             ORDER BY COALESCE(SUM(pri.quantity), 0) DESC
         ");
@@ -85,7 +85,7 @@ try {
     $material_requirements = $pdo->query("
         SELECT m.id, m.material_code, m.name, m.unit, m.current_stock, m.min_stock, m.max_stock, m.cost_per_unit,
                m.category,
-               s.name as supplier_name,
+               COALESCE(NULLIF(s.name, ''), NULLIF(m.supplier, '')) as supplier_name,
                COUNT(DISTINCT pr.project_id) as project_count,
                COALESCE(SUM(pri.quantity), 0) as total_required,
                COALESCE(SUM(CASE WHEN pr.status IN ('pending', 'approved', 'confirmed') THEN pri.quantity ELSE 0 END), 0) as pending_quantity
@@ -94,7 +94,7 @@ try {
         LEFT JOIN purchase_request_items pri ON m.id = pri.material_id
         LEFT JOIN purchase_requests pr ON pri.purchase_request_id = pr.id
         WHERE m.status = 'active'
-        GROUP BY m.id, m.material_code, m.name, m.unit, m.current_stock, m.min_stock, m.max_stock, m.cost_per_unit, m.category, s.name
+        GROUP BY m.id, m.material_code, m.name, m.unit, m.current_stock, m.min_stock, m.max_stock, m.cost_per_unit, m.category, s.name, m.supplier
         HAVING COALESCE(SUM(pri.quantity), 0) > 0 OR m.current_stock <= m.min_stock
         ORDER BY (COALESCE(SUM(pri.quantity), 0) - m.current_stock) DESC
         LIMIT 20
@@ -129,7 +129,7 @@ include '../../includes/header.php';
     <h1><i class="fas fa-boxes"></i> <?php echo $page_title; ?></h1>
     <div class="button-row">
         <?php if (canSubmitMaterialRequirement()): ?>
-        <a href="<?php echo APP_URL; ?>modules/procurement/purchase_requests.php?action=add" class="btn btn-primary"><i class="fas fa-file-invoice"></i> Submit to Procurement</a>
+        <a href="received_projects.php?requests=1<?php echo $project_id > 0 ? '&id=' . $project_id : ''; ?>" class="btn btn-primary"><i class="fas fa-paper-plane"></i> Send to Procurement</a>
         <?php endif; ?>
     </div>
 </div>
@@ -147,7 +147,7 @@ include '../../includes/header.php';
 <?php if (canRequestWarehouseRelease()): ?>
 <div class="card">
     <h3>Request warehouse release</h3>
-    <p class="muted-note">After Procurement and Warehouse have stocked items, request release to the project site.</p>
+    <p class="muted-note">1. Project in-charge requests materials here. 2. Warehouse releases stock if it is on hand. 3. If stock is short, Warehouse sends a purchase request and Procurement buys it.</p>
     <form method="POST">
         <div class="form-group">
             <label>Project</label>
@@ -259,7 +259,7 @@ include '../../includes/header.php';
                         <td><?php echo $material['pr_count']; ?></td>
                         <td>
                             <?php if (canViewModule('procurement')): ?>
-                            <a href="<?php echo APP_URL; ?>modules/procurement/purchase_requests.php?action=add" class="btn btn-sm btn-primary"><i class="fas fa-plus"></i> Create PR</a>
+                            <a href="received_projects.php<?php echo $project_id > 0 ? '?id=' . $project_id : ''; ?>" class="btn btn-sm btn-primary"><i class="fas fa-paper-plane"></i> Request</a>
                             <?php endif; ?>
                         </td>
                     </tr>
@@ -305,7 +305,7 @@ include '../../includes/header.php';
                     <td><?php echo $material['pending_pr_count']; ?></td>
                     <td>
                         <?php if (canViewModule('procurement')): ?>
-                        <a href="<?php echo APP_URL; ?>modules/procurement/purchase_requests.php?action=add" class="btn btn-sm btn-primary"><i class="fas fa-plus"></i> Create PR</a>
+                        <a href="received_projects.php<?php echo $project_id > 0 ? '?id=' . $project_id : ''; ?>" class="btn btn-sm btn-primary"><i class="fas fa-paper-plane"></i> Request</a>
                         <?php endif; ?>
                     </td>
                 </tr>
@@ -359,7 +359,7 @@ include '../../includes/header.php';
                         <td><?php echo $material['project_count']; ?></td>
                         <td>
                             <?php if (canViewModule('procurement')): ?>
-                            <a href="<?php echo APP_URL; ?>modules/procurement/purchase_requests.php?action=add" class="btn btn-sm btn-primary"><i class="fas fa-plus"></i> Create PR</a>
+                            <a href="received_projects.php<?php echo $project_id > 0 ? '?id=' . $project_id : ''; ?>" class="btn btn-sm btn-primary"><i class="fas fa-paper-plane"></i> Request</a>
                             <?php endif; ?>
                         </td>
                     </tr>

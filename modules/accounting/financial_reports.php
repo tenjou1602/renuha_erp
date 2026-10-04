@@ -1,44 +1,185 @@
 <?php
 require_once '../../config/database.php';
 require_once '../../includes/auth.php';
+require_once '../../includes/accounting_ledger.php';
 
 requireDepartment(['accounting']);
 
 $page_title = 'Financial Reports';
 $report_type = $_GET['report'] ?? 'overview';
-$start_date = $_GET['start_date'] ?? date('Y-m-01');
+$start_date = $_GET['start_date'] ?? date('Y-01-01');
 $end_date = $_GET['end_date'] ?? date('Y-m-t');
+if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $start_date)) {
+    $start_date = date('Y-01-01');
+}
+if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $end_date)) {
+    $end_date = date('Y-m-t');
+}
 
 // Report data
 $report_data = [];
 try {
     switch ($report_type) {
         case 'overview':
-            // General overview statistics
-            $report_data['total_revenue'] = $pdo->query("SELECT COALESCE(SUM(amount), 0) FROM invoices WHERE status = 'paid' AND created_at BETWEEN '$start_date' AND '$end_date 23:59:59'")->fetchColumn() ?? 0;
-            $report_data['total_expenses'] = $pdo->query("SELECT COALESCE(SUM(amount), 0) FROM expenses WHERE status = 'paid' AND created_at BETWEEN '$start_date' AND '$end_date 23:59:59'")->fetchColumn() ?? 0;
-            $report_data['purchase_costs'] = $pdo->query("SELECT COALESCE(SUM(total_amount), 0) FROM purchase_requests WHERE status IN ('approved', 'confirmed', 'ordered', 'received') AND created_at BETWEEN '$start_date' AND '$end_date 23:59:59'")->fetchColumn() ?? 0;
+            syncPurchasedMaterialsToAccounting($pdo);
+            $report_data['total_revenue'] = (float) ($pdo->query("
+                SELECT COALESCE(SUM(contract_value), 0)
+                FROM contracts
+                WHERE status = 'active'
+                  AND (start_date IS NULL OR start_date <= '$end_date')
+                  AND (end_date IS NULL OR end_date >= '$start_date')
+            ")->fetchColumn() ?? 0);
+            $report_data['total_revenue'] += (float) ($pdo->query("
+                SELECT COALESCE(SUM(p.estimated_budget), 0)
+                FROM projects p
+                LEFT JOIN contracts c ON c.project_id = p.id AND c.status = 'active'
+                WHERE c.id IS NULL
+                  AND DATE(p.created_at) BETWEEN '$start_date' AND '$end_date'
+                  AND p.estimated_budget > 0
+            ")->fetchColumn() ?? 0);
+
+            $recordedExpenses = (float) ($pdo->query("
+                SELECT COALESCE(SUM(amount), 0)
+                FROM expenses
+                WHERE status IN ('pending', 'paid')
+                  AND COALESCE(expense_date, DATE(created_at)) BETWEEN '$start_date' AND '$end_date'
+            ")->fetchColumn() ?? 0);
+            $laborWages = (float) ($pdo->query("
+                SELECT COALESCE(SUM(l.line_total), 0)
+                FROM labor_budget_lines l
+                INNER JOIN labor_budgets b ON b.id = l.labor_budget_id
+                WHERE b.status = 'active'
+                  AND (
+                    (b.period_start IS NULL AND b.period_end IS NULL AND DATE(b.created_at) BETWEEN '$start_date' AND '$end_date')
+                    OR (
+                      (b.period_start IS NOT NULL OR b.period_end IS NOT NULL)
+                      AND COALESCE(b.period_start, '1000-01-01') <= '$end_date'
+                      AND COALESCE(b.period_end, '9999-12-31') >= '$start_date'
+                    )
+                  )
+            ")->fetchColumn() ?? 0);
+            $report_data['recorded_expenses'] = $recordedExpenses;
+            $report_data['labor_wages'] = $laborWages;
+            $report_data['total_expenses'] = $recordedExpenses + $laborWages;
+
+            $purchaseFromOrders = (float) ($pdo->query("
+                SELECT COALESCE(SUM(GREATEST(poi.quantity - poi.received_quantity, 0) * poi.unit_price), 0)
+                FROM purchase_order_items poi
+                INNER JOIN purchase_orders po ON po.id = poi.purchase_order_id
+                WHERE po.status NOT IN ('draft', 'cancelled')
+                  AND COALESCE(po.order_date, DATE(po.created_at)) BETWEEN '$start_date' AND '$end_date'
+            ")->fetchColumn() ?? 0);
+            $report_data['purchase_costs'] = $purchaseFromOrders;
+            $report_data['purchase_source'] = 'purchases';
+            $recordedMaterialPurchases = (float) ($pdo->query("
+                SELECT COALESCE(SUM(amount), 0)
+                FROM expenses
+                WHERE status IN ('pending', 'paid')
+                  AND category = 'Materials'
+                  AND reference_number LIKE 'PO-%'
+                  AND COALESCE(expense_date, DATE(created_at)) BETWEEN '$start_date' AND '$end_date'
+            ")->fetchColumn() ?? 0);
+            if ($report_data['purchase_costs'] <= 0 && $recordedMaterialPurchases <= 0) {
+                $report_data['purchase_costs'] = (float) ($pdo->query("
+                    SELECT COALESCE(SUM(material_cost), 0)
+                    FROM projects
+                    WHERE material_cost > 0
+                      AND DATE(created_at) BETWEEN '$start_date' AND '$end_date'
+                ")->fetchColumn() ?? 0);
+                $report_data['purchase_source'] = 'quotation';
+            }
             $report_data['net_profit'] = $report_data['total_revenue'] - $report_data['total_expenses'] - $report_data['purchase_costs'];
-            
-            // Monthly trend
-            $report_data['monthly_trend'] = $pdo->query("
-                SELECT DATE_FORMAT(created_at, '%b %Y') as month, 
-                       COALESCE(SUM(CASE WHEN status = 'paid' THEN amount ELSE 0 END), 0) as revenue,
-                       COALESCE(SUM(CASE WHEN status = 'paid' THEN amount ELSE 0 END), 0) as expenses
-                FROM invoices
-                WHERE created_at BETWEEN DATE_SUB('$start_date', INTERVAL 5 MONTH) AND '$end_date 23:59:59'
-                GROUP BY YEAR(created_at), MONTH(created_at), month
-                ORDER BY YEAR(created_at), MONTH(created_at)
-            ")->fetchAll();
-            
-            // Expense breakdown
+
             $report_data['expense_breakdown'] = $pdo->query("
                 SELECT category, COUNT(*) as count, COALESCE(SUM(amount), 0) as total
                 FROM expenses
-                WHERE created_at BETWEEN '$start_date' AND '$end_date 23:59:59'
+                WHERE status IN ('pending', 'paid')
+                  AND COALESCE(expense_date, DATE(created_at)) BETWEEN '$start_date' AND '$end_date'
                 GROUP BY category
                 ORDER BY total DESC
             ")->fetchAll();
+            if ($laborWages > 0) {
+                $report_data['expense_breakdown'][] = ['category' => 'Labor wages', 'count' => 0, 'total' => $laborWages];
+            }
+            if ($report_data['purchase_costs'] > 0) {
+                $report_data['expense_breakdown'][] = [
+                    'category' => $report_data['purchase_source'] === 'quotation' ? 'Quotation material' : 'Purchase costs',
+                    'count' => 0,
+                    'total' => $report_data['purchase_costs'],
+                ];
+            }
+
+            $trend = [];
+            $cursor = new DateTime(substr($start_date, 0, 7) . '-01');
+            $cursor->modify('-5 months');
+            $lastMonth = new DateTime(substr($end_date, 0, 7) . '-01');
+            while ($cursor <= $lastMonth) {
+                $trend[$cursor->format('Y-m')] = [
+                    'month' => $cursor->format('M Y'),
+                    'revenue' => 0.0,
+                    'expenses' => 0.0,
+                    'purchases' => 0.0,
+                ];
+                $cursor->modify('+1 month');
+            }
+            $addTrend = static function (array $rows, string $field) use (&$trend): void {
+                foreach ($rows as $row) {
+                    $key = $row['sort_month'] ?? '';
+                    if (!isset($trend[$key])) {
+                        $trend[$key] = ['month' => $row['month'], 'revenue' => 0.0, 'expenses' => 0.0, 'purchases' => 0.0];
+                    }
+                    $trend[$key][$field] += (float) $row['total'];
+                }
+            };
+            $trendStart = (new DateTime(substr($start_date, 0, 7) . '-01'))->modify('-5 months')->format('Y-m-d');
+            $addTrend($pdo->query("
+                SELECT DATE_FORMAT(COALESCE(start_date, created_at), '%Y-%m') AS sort_month,
+                       DATE_FORMAT(COALESCE(start_date, created_at), '%b %Y') AS month,
+                       COALESCE(SUM(contract_value), 0) AS total
+                FROM contracts
+                WHERE status = 'active'
+                GROUP BY sort_month, month
+            ")->fetchAll(), 'revenue');
+            $addTrend($pdo->query("
+                SELECT DATE_FORMAT(COALESCE(expense_date, created_at), '%Y-%m') AS sort_month,
+                       DATE_FORMAT(COALESCE(expense_date, created_at), '%b %Y') AS month,
+                       COALESCE(SUM(amount), 0) AS total
+                FROM expenses
+                WHERE status IN ('pending', 'paid')
+                  AND COALESCE(expense_date, DATE(created_at)) BETWEEN '$trendStart' AND '$end_date'
+                GROUP BY sort_month, month
+            ")->fetchAll(), 'expenses');
+            $addTrend($pdo->query("
+                SELECT DATE_FORMAT(b.created_at, '%Y-%m') AS sort_month,
+                       DATE_FORMAT(b.created_at, '%b %Y') AS month,
+                       COALESCE(SUM(l.line_total), 0) AS total
+                FROM labor_budget_lines l
+                INNER JOIN labor_budgets b ON b.id = l.labor_budget_id
+                WHERE b.status = 'active'
+                GROUP BY sort_month, month
+            ")->fetchAll(), 'expenses');
+            if ($report_data['purchase_source'] === 'quotation') {
+                $addTrend($pdo->query("
+                    SELECT DATE_FORMAT(created_at, '%Y-%m') AS sort_month,
+                           DATE_FORMAT(created_at, '%b %Y') AS month,
+                           COALESCE(SUM(material_cost), 0) AS total
+                    FROM projects
+                    WHERE material_cost > 0
+                    GROUP BY sort_month, month
+                ")->fetchAll(), 'purchases');
+            } else {
+                $addTrend($pdo->query("
+                    SELECT DATE_FORMAT(COALESCE(po.order_date, po.created_at), '%Y-%m') AS sort_month,
+                           DATE_FORMAT(COALESCE(po.order_date, po.created_at), '%b %Y') AS month,
+                           COALESCE(SUM(GREATEST(poi.quantity - poi.received_quantity, 0) * poi.unit_price), 0) AS total
+                    FROM purchase_order_items poi
+                    INNER JOIN purchase_orders po ON po.id = poi.purchase_order_id
+                    WHERE po.status NOT IN ('draft', 'cancelled')
+                    GROUP BY sort_month, month
+                ")->fetchAll(), 'purchases');
+            }
+            ksort($trend);
+            $report_data['monthly_trend'] = array_values($trend);
             break;
             
         case 'projects':
@@ -91,11 +232,11 @@ try {
             ")->fetchAll();
             
             $report_data['cash_outflow'] = $pdo->query("
-                SELECT DATE_FORMAT(created_at, '%b %Y') as month, COALESCE(SUM(amount), 0) as total
+                SELECT DATE_FORMAT(COALESCE(expense_date, created_at), '%b %Y') as month, COALESCE(SUM(amount), 0) as total
                 FROM expenses
-                WHERE status = 'paid' AND created_at BETWEEN DATE_SUB('$start_date', INTERVAL 5 MONTH) AND '$end_date 23:59:59'
-                GROUP BY YEAR(created_at), MONTH(created_at), month
-                ORDER BY YEAR(created_at), MONTH(created_at)
+                WHERE status IN ('pending', 'paid') AND COALESCE(expense_date, created_at) BETWEEN DATE_SUB('$start_date', INTERVAL 5 MONTH) AND '$end_date 23:59:59'
+                GROUP BY YEAR(COALESCE(expense_date, created_at)), MONTH(COALESCE(expense_date, created_at)), month
+                ORDER BY YEAR(COALESCE(expense_date, created_at)), MONTH(COALESCE(expense_date, created_at))
             ")->fetchAll();
             break;
             
@@ -113,19 +254,6 @@ try {
                 FROM funds
                 WHERE status = 'active'
                 ORDER BY available DESC
-            ")->fetchAll();
-            
-            $report_data['labor_budgets'] = $pdo->query("
-                SELECT 
-                    budget_name,
-                    project_id,
-                    allocated_amount,
-                    used_amount,
-                    (allocated_amount - used_amount) as remaining,
-                    status
-                FROM labor_budgets
-                WHERE status = 'active'
-                ORDER BY remaining ASC
             ")->fetchAll();
             
             $report_data['contract_status'] = $pdo->query("
@@ -148,7 +276,7 @@ try {
                     COALESCE(SUM(total_amount), 0) as total_cost,
                     COUNT(*) as request_count
                 FROM purchase_requests
-                WHERE status IN ('approved', 'confirmed', 'ordered', 'received') 
+                WHERE status IN ('approved', 'confirmed', 'ordered', 'received', 'completed') 
                 AND created_at BETWEEN DATE_SUB('$start_date', INTERVAL 5 MONTH) AND '$end_date 23:59:59'
                 GROUP BY YEAR(created_at), MONTH(created_at), month
                 ORDER BY YEAR(created_at), MONTH(created_at)
@@ -162,13 +290,30 @@ try {
                 FROM suppliers s
                 LEFT JOIN materials m ON s.id = m.supplier_id
                 LEFT JOIN purchase_request_items pri ON m.id = pri.material_id
-                LEFT JOIN purchase_requests pr ON pri.purchase_request_id = pr.id AND pr.status IN ('approved', 'confirmed', 'ordered', 'received')
+                LEFT JOIN purchase_requests pr ON pri.purchase_request_id = pr.id AND pr.status IN ('approved', 'confirmed', 'ordered', 'received', 'completed')
                 WHERE s.status = 'active'
                 GROUP BY s.id, s.name
                 HAVING total_value > 0
                 ORDER BY total_value DESC
                 LIMIT 10
             ")->fetchAll();
+            break;
+
+        case 'receivables':
+            $report_data['balances'] = ledgerAccountBalances();
+            $stmt = $pdo->prepare("
+                SELECT je.entry_date, je.description, a.name AS account_name, jl.debit, jl.credit
+                FROM journal_lines jl
+                JOIN journal_entries je ON je.id = jl.journal_entry_id
+                JOIN chart_of_accounts a ON a.id = jl.account_id
+                WHERE je.entry_date BETWEEN ? AND ?
+                ORDER BY je.entry_date, je.id, jl.id
+            ");
+            $stmt->execute([$start_date, $end_date]);
+            $report_data['journal'] = $stmt->fetchAll();
+            $pipeline = $pdo->query("SELECT COUNT(*) AS quote_count, COALESCE(SUM(grand_total), 0) AS quote_total FROM client_quotations WHERE status = 'approved'")->fetch();
+            $report_data['approved_quotes'] = $pipeline['quote_count'] ?? 0;
+            $report_data['approved_total'] = $pipeline['quote_total'] ?? 0;
             break;
     }
 } catch (PDOException $e) {
@@ -238,6 +383,12 @@ include '../../includes/header.php';
     color: #64748b;
     margin-top: 0.5rem;
 }
+.stat-card .hint {
+    font-size: 0.75rem;
+    color: #94a3b8;
+    margin-top: 0.35rem;
+    line-height: 1.35;
+}
 .profit-positive { color: #1cc88a; }
 .profit-negative { color: #e74a3b; }
 </style>
@@ -257,6 +408,7 @@ include '../../includes/header.php';
     <a href="?report=cashflow&start_date=<?php echo $start_date; ?>&end_date=<?php echo $end_date; ?>" class="btn <?php echo $report_type === 'cashflow' ? 'active' : 'btn-secondary'; ?>"><i class="fas fa-money-bill-wave"></i> Cash Flow</a>
     <a href="?report=budgets&start_date=<?php echo $start_date; ?>&end_date=<?php echo $end_date; ?>" class="btn <?php echo $report_type === 'budgets' ? 'active' : 'btn-secondary'; ?>"><i class="fas fa-wallet"></i> Budgets</a>
     <a href="?report=procurement&start_date=<?php echo $start_date; ?>&end_date=<?php echo $end_date; ?>" class="btn <?php echo $report_type === 'procurement' ? 'active' : 'btn-secondary'; ?>"><i class="fas fa-shopping-cart"></i> Procurement</a>
+    <a href="?report=receivables&start_date=<?php echo $start_date; ?>&end_date=<?php echo $end_date; ?>" class="btn <?php echo $report_type === 'receivables' ? 'active' : 'btn-secondary'; ?>"><i class="fas fa-book"></i> Receivables</a>
 </div>
 
 <!-- Date Filters -->
@@ -282,18 +434,22 @@ include '../../includes/header.php';
     <div class="stat-card">
         <div class="value">₱<?php echo number_format($report_data['total_revenue'] ?? 0, 2); ?></div>
         <div class="label">Total Revenue</div>
+        <div class="hint">Contract at quotation total</div>
     </div>
     <div class="stat-card" style="border-left-color:#e74a3b;">
         <div class="value">₱<?php echo number_format($report_data['total_expenses'] ?? 0, 2); ?></div>
         <div class="label">Total Expenses</div>
+        <div class="hint">Expenses ₱<?php echo number_format($report_data['recorded_expenses'] ?? 0, 2); ?> + labor ₱<?php echo number_format($report_data['labor_wages'] ?? 0, 2); ?></div>
     </div>
     <div class="stat-card" style="border-left-color:#36b9cc;">
         <div class="value">₱<?php echo number_format($report_data['purchase_costs'] ?? 0, 2); ?></div>
-        <div class="label">Purchase Costs</div>
+        <div class="label"><a href="purchase_costs.php">Purchase Costs</a></div>
+        <div class="hint"><?php echo ($report_data['purchase_source'] ?? '') === 'quotation' ? 'Quotation material cost. Wala pang purchase.' : 'From approved purchases.'; ?></div>
     </div>
     <div class="stat-card" style="border-left-color:#1cc88a;">
         <div class="value <?php echo ($report_data['net_profit'] ?? 0) >= 0 ? 'profit-positive' : 'profit-negative'; ?>">₱<?php echo number_format($report_data['net_profit'] ?? 0, 2); ?></div>
         <div class="label">Net Profit</div>
+        <div class="hint">Revenue − expenses − purchase costs</div>
     </div>
 </div>
 
@@ -306,7 +462,7 @@ include '../../includes/header.php';
     </div>
     <div class="card chart-card">
         <div class="card-header">
-            <h3 class="card-title"><i class="fas fa-chart-pie"></i> Expense Breakdown</h3>
+            <h3 class="card-title"><i class="fas fa-chart-pie"></i> Cost Breakdown</h3>
         </div>
         <canvas id="expenseBreakdownChart"></canvas>
     </div>
@@ -325,13 +481,27 @@ if (monthlyTrendCtx) {
                 data: <?php echo json_encode(array_map('floatval', array_column($report_data['monthly_trend'] ?? [], 'revenue'))); ?>,
                 borderColor: '#1cc88a',
                 backgroundColor: 'rgba(28,200,138,0.1)',
-                fill: true,
+                fill: false,
+                tension: 0.35
+            }, {
+                label: 'Expenses',
+                data: <?php echo json_encode(array_map('floatval', array_column($report_data['monthly_trend'] ?? [], 'expenses'))); ?>,
+                borderColor: '#e74a3b',
+                backgroundColor: 'rgba(231,74,59,0.08)',
+                fill: false,
+                tension: 0.35
+            }, {
+                label: 'Purchase Costs',
+                data: <?php echo json_encode(array_map('floatval', array_column($report_data['monthly_trend'] ?? [], 'purchases'))); ?>,
+                borderColor: '#36b9cc',
+                backgroundColor: 'rgba(54,185,204,0.08)',
+                fill: false,
                 tension: 0.35
             }]
         },
         options: {
             responsive: true,
-            plugins: { legend: { display: false } },
+            plugins: { legend: { position: 'bottom' } },
             scales: { y: { beginAtZero: true } }
         }
     });
@@ -511,34 +681,6 @@ if (cashFlowCtx) {
 </div>
 
 <div class="card">
-    <h3 class="section-title"><i class="fas fa-users"></i> Labor Budget Status</h3>
-    <div class="table-responsive">
-        <table class="table">
-            <thead>
-                <tr>
-                    <th>Budget Name</th>
-                    <th>Allocated</th>
-                    <th>Used</th>
-                    <th>Remaining</th>
-                    <th>Status</th>
-                </tr>
-            </thead>
-            <tbody>
-                <?php foreach ($report_data['labor_budgets'] ?? [] as $budget): ?>
-                <tr>
-                    <td><strong><?php echo htmlspecialchars($budget['budget_name']); ?></strong></td>
-                    <td>₱<?php echo number_format($budget['allocated_amount'], 2); ?></td>
-                    <td>₱<?php echo number_format($budget['used_amount'], 2); ?></td>
-                    <td class="<?php echo $budget['remaining'] >= 0 ? 'profit-positive' : 'profit-negative'; ?>">₱<?php echo number_format($budget['remaining'], 2); ?></td>
-                    <td><span class="badge badge-<?php echo $budget['status'] == 'active' ? 'success' : 'secondary'; ?>"><?php echo ucfirst($budget['status']); ?></span></td>
-                </tr>
-                <?php endforeach; ?>
-            </tbody>
-        </table>
-    </div>
-</div>
-
-<div class="card">
     <h3 class="section-title"><i class="fas fa-file-contract"></i> Contract Status</h3>
     <div class="table-responsive">
         <table class="table">
@@ -623,6 +765,43 @@ if (procurementTrendCtx) {
     </div>
 </div>
 
+<?php elseif ($report_type === 'receivables'): ?>
+<div class="stat-cards">
+    <div class="stat-card" style="border-left-color:#f6c23e;">
+        <div class="value">₱<?php echo number_format($report_data['approved_total'] ?? 0, 2); ?></div>
+        <div class="label">Approved quotations not yet invoiced (<?php echo number_format($report_data['approved_quotes'] ?? 0); ?>)</div>
+    </div>
+    <?php foreach ($report_data['balances'] ?? [] as $balance): ?>
+    <div class="stat-card">
+        <div class="value">₱<?php echo number_format($balance['balance'], 2); ?></div>
+        <div class="label"><?php echo htmlspecialchars($balance['name']); ?></div>
+    </div>
+    <?php endforeach; ?>
+</div>
+<div class="card">
+    <h3>Ledger lines</h3>
+    <p style="color:#64748b;">Approved quotations are excluded. These lines come from issued invoices and cash payments.</p>
+    <div class="table-responsive">
+        <table class="table">
+            <thead><tr><th>Date</th><th>Reference</th><th>Account</th><th>Debit</th><th>Credit</th></tr></thead>
+            <tbody>
+                <?php if (empty($report_data['journal'])): ?>
+                    <tr><td colspan="5" style="text-align:center;color:#94a3b8;padding:2rem;">No ledger lines in this period.</td></tr>
+                <?php else: ?>
+                    <?php foreach ($report_data['journal'] as $line): ?>
+                    <tr>
+                        <td><?php echo date('M d, Y', strtotime($line['entry_date'])); ?></td>
+                        <td><?php echo htmlspecialchars($line['description']); ?></td>
+                        <td><?php echo htmlspecialchars($line['account_name']); ?></td>
+                        <td><?php echo (float) $line['debit'] > 0 ? '₱' . number_format($line['debit'], 2) : ''; ?></td>
+                        <td><?php echo (float) $line['credit'] > 0 ? '₱' . number_format($line['credit'], 2) : ''; ?></td>
+                    </tr>
+                    <?php endforeach; ?>
+                <?php endif; ?>
+            </tbody>
+        </table>
+    </div>
+</div>
 <?php endif; ?>
 
 <?php include '../../includes/footer.php'; ?>

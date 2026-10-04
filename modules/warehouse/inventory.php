@@ -1,10 +1,17 @@
 <?php
 require_once '../../config/database.php';
 require_once '../../includes/auth.php';
+require_once '../../includes/warehouse_fifo.php';
 
 requireDepartment(['warehouse']);
 
-$page_title = 'Inventory Report';
+try {
+    ensureWarehouseFifoBatches($pdo);
+} catch (Throwable $e) {
+    error_log('[Runeha ERP] fifo batches: ' . $e->getMessage());
+}
+
+$page_title = 'Inventory Reports';
 
 // Get inventory with stock status
 $inventory = [];
@@ -17,8 +24,8 @@ try {
                 WHEN m.current_stock <= m.min_stock THEN 'Low Stock'
                 ELSE 'In Stock'
             END as stock_status,
-            (SELECT COUNT(*) FROM stock_movements WHERE material_id = m.id AND movement_type = 'in') as total_in,
-            (SELECT COUNT(*) FROM stock_movements WHERE material_id = m.id AND movement_type = 'out') as total_out
+            (SELECT ws.batch_number FROM warehouse_stock ws WHERE ws.material_id = m.id AND ws.quantity > 0 ORDER BY ws.created_at ASC, ws.id ASC LIMIT 1) AS fifo_batch,
+            (SELECT ws.quantity FROM warehouse_stock ws WHERE ws.material_id = m.id AND ws.quantity > 0 ORDER BY ws.created_at ASC, ws.id ASC LIMIT 1) AS fifo_qty
         FROM materials m
         WHERE m.status = 'active'
         ORDER BY 
@@ -83,15 +90,17 @@ include '../../includes/header.php';
                     <th onclick="sortTable('inventoryTable', 2)">Category</th>
                     <th onclick="sortTable('inventoryTable', 3)">Unit</th>
                     <th onclick="sortTable('inventoryTable', 4)">Current Stock</th>
+                    <th>FIFO next out</th>
                     <th onclick="sortTable('inventoryTable', 5)">Min Stock</th>
                     <th onclick="sortTable('inventoryTable', 6)">Status</th>
                     <th onclick="sortTable('inventoryTable', 7)">Value</th>
+                    <th>Action</th>
                 </tr>
             </thead>
             <tbody>
                 <?php if (empty($inventory)): ?>
                     <tr>
-                        <td colspan="8" style="text-align:center;color:#94a3b8;padding:2rem;">No inventory items found.</td>
+                        <td colspan="10" style="text-align:center;color:#94a3b8;padding:2rem;">No inventory items found.</td>
                     </tr>
                 <?php else: ?>
                     <?php foreach ($inventory as $item):
@@ -110,6 +119,14 @@ include '../../includes/header.php';
                         <td>
                             <strong><?php echo number_format($item['current_stock']); ?></strong>
                         </td>
+                        <td>
+                            <?php if (!empty($item['fifo_batch'])): ?>
+                                <?php echo htmlspecialchars($item['fifo_batch']); ?>
+                                <small>(<?php echo number_format((int) $item['fifo_qty']); ?>)</small>
+                            <?php else: ?>
+                                —
+                            <?php endif; ?>
+                        </td>
                         <td><?php echo number_format($item['min_stock']); ?></td>
                         <td>
                             <?php if ($item['stock_status'] === 'Out of Stock'): ?>
@@ -121,19 +138,25 @@ include '../../includes/header.php';
                             <?php endif; ?>
                         </td>
                         <td>₱<?php echo number_format($item['current_stock'] * $item['cost_per_unit'], 2); ?></td>
+                        <td>
+                            <a href="stock.php?action=in&material_id=<?php echo (int) $item['id']; ?>" class="btn btn-sm btn-success">Stock-In</a>
+                            <a href="material_requests.php" class="btn btn-sm btn-warning">Release</a>
+                            <a href="inventory_history.php?material_id=<?php echo (int) $item['id']; ?>" class="btn btn-sm btn-info">History</a>
+                        </td>
                     </tr>
                     <?php endforeach; ?>
                 <?php endif; ?>
             </tbody>
             <tfoot>
                 <tr>
-                    <th colspan="7" style="text-align:right;">Total Inventory Value:</th>
+                    <th colspan="8" style="text-align:right;">Total Inventory Value:</th>
                     <th>
                         <?php 
                         $total_value = array_sum(array_map(fn($item) => $item['current_stock'] * $item['cost_per_unit'], $inventory));
                         echo '₱' . number_format($total_value, 2);
                         ?>
                     </th>
+                    <th></th>
                 </tr>
             </tfoot>
         </table>

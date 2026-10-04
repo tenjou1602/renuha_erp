@@ -2,12 +2,12 @@
 require_once '../../config/database.php';
 require_once '../../includes/auth.php';
 
-requireDepartment(['accounting']);
+requireDepartment(['accounting', 'procurement']);
 
 $page_title = 'Purchase Costs';
 $action = $_GET['action'] ?? 'list';
 $id = (int)($_GET['id'] ?? 0);
-$start_date = $_GET['start_date'] ?? date('Y-m-01');
+$start_date = $_GET['start_date'] ?? date('Y-01-01');
 $end_date = $_GET['end_date'] ?? date('Y-m-t');
 
 // Get purchase costs data
@@ -19,8 +19,8 @@ $cost_summary = [];
 try {
     // Overall purchase costs summary
     $cost_summary['total_requests'] = $pdo->query("SELECT COUNT(*) FROM purchase_requests WHERE created_at BETWEEN '$start_date' AND '$end_date 23:59:59'")->fetchColumn() ?? 0;
-    $cost_summary['total_amount'] = $pdo->query("SELECT COALESCE(SUM(total_amount), 0) FROM purchase_requests WHERE status IN ('approved', 'confirmed', 'ordered', 'received') AND created_at BETWEEN '$start_date' AND '$end_date 23:59:59'")->fetchColumn() ?? 0;
-    $cost_summary['paid_amount'] = $pdo->query("SELECT COALESCE(SUM(total_amount), 0) FROM purchase_requests WHERE status = 'received' AND created_at BETWEEN '$start_date' AND '$end_date 23:59:59'")->fetchColumn() ?? 0;
+    $cost_summary['total_amount'] = $pdo->query("SELECT COALESCE(SUM(total_amount), 0) FROM purchase_requests WHERE status IN ('approved', 'confirmed', 'ordered', 'received', 'completed') AND created_at BETWEEN '$start_date' AND '$end_date 23:59:59'")->fetchColumn() ?? 0;
+    $cost_summary['paid_amount'] = $pdo->query("SELECT COALESCE(SUM(total_amount), 0) FROM purchase_requests WHERE status IN ('received', 'completed') AND created_at BETWEEN '$start_date' AND '$end_date 23:59:59'")->fetchColumn() ?? 0;
     $cost_summary['pending_amount'] = $cost_summary['total_amount'] - $cost_summary['paid_amount'];
     
     // Purchase costs by project
@@ -30,8 +30,8 @@ try {
             p.project_code,
             p.name as project_name,
             COUNT(DISTINCT pr.id) as request_count,
-            COALESCE(SUM(CASE WHEN pr.status IN ('approved', 'confirmed', 'ordered', 'received') THEN pr.total_amount ELSE 0 END), 0) as total_cost,
-            COALESCE(SUM(CASE WHEN pr.status = 'received' THEN pr.total_amount ELSE 0 END), 0) as paid_cost,
+            COALESCE(SUM(CASE WHEN pr.status IN ('approved', 'confirmed', 'ordered', 'received', 'completed') THEN pr.total_amount ELSE 0 END), 0) as total_cost,
+            COALESCE(SUM(CASE WHEN pr.status IN ('received', 'completed') THEN pr.total_amount ELSE 0 END), 0) as paid_cost,
             COALESCE(SUM(CASE WHEN pr.status IN ('approved', 'confirmed', 'ordered') THEN pr.total_amount ELSE 0 END), 0) as pending_cost
         FROM projects p
         LEFT JOIN purchase_requests pr ON p.id = pr.project_id AND pr.created_at BETWEEN '$start_date' AND '$end_date 23:59:59'

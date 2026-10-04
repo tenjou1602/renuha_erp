@@ -153,7 +153,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 $projects = $pdo->query("SELECT id, name, project_code FROM projects WHERE status != 'completed' ORDER BY name")->fetchAll();
 
 // Get materials for dropdown
-$materials = $pdo->query("SELECT id, name, material_code, unit, cost_per_unit FROM materials WHERE status = 'active' ORDER BY name")->fetchAll();
+$materials = $pdo->query("SELECT id, name, material_code, unit, cost_per_unit, current_stock, min_stock FROM materials WHERE status = 'active' ORDER BY name")->fetchAll();
+$prefill_material_id = (int) ($_GET['material_id'] ?? 0);
+$prefill_qty = 1;
+$prefill_cost = 0;
+$prefill_unit = 'pcs';
+$prefill_purpose = '';
+foreach ($materials as $material) {
+    if ((int) $material['id'] === $prefill_material_id) {
+        $need = (int) $material['min_stock'] - (int) $material['current_stock'];
+        $prefill_qty = $need > 0 ? $need : 1;
+        $prefill_cost = (float) $material['cost_per_unit'];
+        $prefill_unit = $material['unit'] ?: 'pcs';
+        $prefill_purpose = 'Restock ' . $material['name'] . ' (' . $material['material_code'] . ')';
+        break;
+    }
+}
 
 // Get purchase requests
 $requests = [];
@@ -215,10 +230,12 @@ include '../../includes/header.php';
 
 <div class="page-header">
     <h1><i class="fas fa-file-invoice"></i> <?php echo $page_title; ?></h1>
-    <?php if ($action === 'list' && canSubmitMaterialRequirement()): ?>
+    <?php if ($action === 'list' && canSubmitMaterialRequirement() && !canWriteDepartmentData('procurement')): ?>
     <a href="?action=add" class="btn btn-primary"><i class="fas fa-plus"></i> Submit Material Requirement</a>
     <?php endif; ?>
 </div>
+
+<p style="color:#64748b;margin-top:0;">Tanggapin muna ang request, pumili ng supplier sa Price / Supplier Comparison, tapos gumawa ng purchase order.</p>
 
 <?php if (isset($_SESSION['success'])): ?>
     <div class="alert alert-success"><?php echo htmlspecialchars($_SESSION['success']); unset($_SESSION['success']); ?></div>
@@ -266,7 +283,7 @@ include '../../includes/header.php';
         </div>
         <div class="form-group">
             <label>Purpose *</label>
-            <textarea name="purpose" required rows="3"><?php echo htmlspecialchars($request_details['purpose'] ?? ''); ?></textarea>
+            <textarea name="purpose" required rows="3"><?php echo htmlspecialchars($request_details['purpose'] ?? $prefill_purpose); ?></textarea>
         </div>
         
         <h4 style="margin: 1.5rem 0 1rem;">Requested Items</h4>
@@ -316,7 +333,7 @@ include '../../includes/header.php';
                             <select name="items[0][material_id]" required>
                                 <option value="">Select Material</option>
                                 <?php foreach ($materials as $material): ?>
-                                    <option value="<?php echo $material['id']; ?>">
+                                    <option value="<?php echo $material['id']; ?>" <?php echo $prefill_material_id === (int) $material['id'] ? 'selected' : ''; ?>>
                                         <?php echo htmlspecialchars($material['material_code'] . ' - ' . $material['name']); ?>
                                     </option>
                                 <?php endforeach; ?>
@@ -324,15 +341,15 @@ include '../../includes/header.php';
                         </div>
                         <div class="form-group">
                             <label>Quantity</label>
-                            <input type="number" name="items[0][quantity]" value="1" min="1" required>
+                            <input type="number" name="items[0][quantity]" value="<?php echo (int) $prefill_qty; ?>" min="1" required>
                         </div>
                         <div class="form-group">
                             <label>Unit</label>
-                            <input type="text" name="items[0][unit]" value="pcs" placeholder="pcs">
+                            <input type="text" name="items[0][unit]" value="<?php echo htmlspecialchars($prefill_unit); ?>" placeholder="pcs">
                         </div>
                         <div class="form-group">
                             <label>Est. Cost (₱)</label>
-                            <input type="number" step="0.01" name="items[0][estimated_cost]" value="0" min="0">
+                            <input type="number" step="0.01" name="items[0][estimated_cost]" value="<?php echo htmlspecialchars((string) $prefill_cost); ?>" min="0">
                         </div>
                         <div class="form-group">
                             <label>Remarks</label>
@@ -472,18 +489,32 @@ document.querySelectorAll('.remove-item').forEach(btn => {
     </table>
     
     <div style="margin-top: 1.5rem;">
-        <?php if ($request_details['status'] === 'pending' && isManager()): ?>
-            <button class="btn btn-success" onclick="openApproveModal(<?php echo $request_details['id']; ?>, 'approved')"><i class="fas fa-check"></i> Approve</button>
-            <button class="btn btn-danger" onclick="openApproveModal(<?php echo $request_details['id']; ?>, 'rejected')"><i class="fas fa-times"></i> Reject</button>
-        <?php endif; ?>
-        <?php if (canConfirmPurchaseRequest($request_details['status'])): ?>
-            <form method="POST" style="display:inline;" onsubmit="return confirm('Confirm this purchase request for PO conversion?');">
-                <input type="hidden" name="confirm_request" value="1">
-                <input type="hidden" name="request_id" value="<?php echo (int)$request_details['id']; ?>">
-                <button type="submit" class="btn btn-primary"><i class="fas fa-stamp"></i> Confirm (Admin)</button>
+        <?php
+        $next_quote = null;
+        $next_order = null;
+        if ($request_details) {
+            $next_quote = $pdo->prepare("SELECT id FROM quotations WHERE purchase_request_id = ? AND status = 'accepted' ORDER BY id DESC LIMIT 1");
+            $next_quote->execute([(int) $request_details['id']]);
+            $next_quote = $next_quote->fetchColumn() ?: null;
+            $next_order = $pdo->prepare("SELECT id FROM purchase_orders WHERE purchase_request_id = ? AND status <> 'cancelled' ORDER BY id DESC LIMIT 1");
+            $next_order->execute([(int) $request_details['id']]);
+            $next_order = $next_order->fetchColumn() ?: null;
+        }
+        ?>
+        <?php if ($request_details['status'] === 'pending' && canWriteDepartmentData('procurement')): ?>
+            <form method="POST" action="received_requests.php" style="display:inline;">
+                <input type="hidden" name="accept_request" value="1">
+                <input type="hidden" name="request_id" value="<?php echo (int) $request_details['id']; ?>">
+                <button type="submit" class="btn btn-primary"><i class="fas fa-check"></i> Accept request</button>
             </form>
+        <?php elseif ($next_order): ?>
+            <a href="purchase_orders.php?action=view&id=<?php echo (int) $next_order; ?>" class="btn btn-primary"><i class="fas fa-shopping-cart"></i> View purchase order</a>
+        <?php elseif ($next_quote && canWriteDepartmentData('procurement')): ?>
+            <a href="purchase_orders.php?action=add&quote=<?php echo (int) $next_quote; ?>" class="btn btn-primary"><i class="fas fa-shopping-cart"></i> Create purchase order</a>
+        <?php elseif (in_array($request_details['status'], ['approved', 'confirmed'], true) && canWriteDepartmentData('procurement')): ?>
+            <a href="quotations.php?action=add&pr=<?php echo (int) $request_details['id']; ?>" class="btn btn-primary"><i class="fas fa-balance-scale"></i> Compare supplier prices</a>
         <?php endif; ?>
-        <a href="purchase_requests.php" class="btn btn-secondary"><i class="fas fa-arrow-left"></i> Back</a>
+        <a href="received_requests.php" class="btn btn-secondary"><i class="fas fa-arrow-left"></i> Back</a>
     </div>
 </div>
 
@@ -565,6 +596,12 @@ function closeApproveModal() {
                                 <input type="hidden" name="request_id" value="<?php echo (int)$request['id']; ?>">
                                 <button type="submit" class="btn btn-sm btn-primary" title="Admin Confirm"><i class="fas fa-stamp"></i></button>
                             </form>
+                        <?php endif; ?>
+                        <?php if (in_array($request['status'], ['approved', 'confirmed'], true) && canWriteDepartmentData('procurement')): ?>
+                            <a href="quotations.php?action=add&pr=<?php echo (int) $request['id']; ?>" class="btn btn-sm btn-outline" title="Supplier quote">Quote</a>
+                        <?php endif; ?>
+                        <?php if (in_array($request['status'], ['approved', 'confirmed', 'ordered'], true) && canWriteDepartmentData('procurement')): ?>
+                            <a href="purchase_orders.php?action=add&pr=<?php echo (int) $request['id']; ?>" class="btn btn-sm btn-primary" title="Create purchase order">PO</a>
                         <?php endif; ?>
                     </td>
                 </tr>

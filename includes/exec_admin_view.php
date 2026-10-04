@@ -151,7 +151,7 @@ $dept_dot = [
             </div>
         </div>
         <div class="exec-card">
-            <h3><i class="fas fa-shopping-cart"></i> Procurement Overview</h3>
+            <h3><i class="fas fa-shopping-cart"></i> Procurement Activity</h3>
             <div class="exec-rows">
                 <div class="exec-row"><span><span class="exec-dot" style="background:#f59e0b"></span>Pending Material Requests</span><strong><?php echo number_format((int)($items_needing_attention['pending_material_requests'] ?? 0)); ?></strong></div>
                 <div class="exec-row"><span><span class="exec-dot" style="background:#3b82f6"></span>Pending Purchases</span><strong><?php echo number_format((int)($stats['pending_purchases'] ?? 0)); ?></strong></div>
@@ -160,7 +160,7 @@ $dept_dot = [
             </div>
         </div>
         <div class="exec-card">
-            <h3><i class="fas fa-warehouse"></i> Warehouse Overview <a href="<?php echo APP_URL; ?>modules/warehouse/inventory.php" style="margin-left:auto;font-size:.72rem;font-weight:600;color:#2563eb;">View Stock</a></h3>
+            <h3><i class="fas fa-warehouse"></i> Warehouse / Inventory Status</h3>
             <div class="exec-rows">
                 <div class="exec-row"><span>Low Stock Items</span><strong><?php echo number_format((int)($stats['low_stock_items'] ?? 0)); ?></strong></div>
                 <div class="exec-row"><span>Total Stock Items</span><strong><?php echo number_format((int)($stats['inventory_items'] ?? 0)); ?></strong></div>
@@ -181,7 +181,7 @@ $dept_dot = [
 
     <div class="exec-charts">
         <div class="exec-card">
-            <h3>Project Status</h3>
+            <h3>Overall Project Status</h3>
             <div class="exec-donut">
                 <div class="chart-box">
                     <canvas id="execStatusChart" width="150" height="150"></canvas>
@@ -269,12 +269,12 @@ $dept_dot = [
         <div class="exec-card">
             <h3>Quick Actions</h3>
             <div class="exec-qa">
-                <a class="t1" href="<?php echo APP_URL; ?>modules/projects/projects.php?action=add"><i class="fas fa-plus"></i>Create New Project</a>
-                <a class="t2" href="<?php echo APP_URL; ?>modules/projects/projects.php?action=add"><i class="fas fa-user-plus"></i>Add Client</a>
-                <a class="t3" href="<?php echo APP_URL; ?>modules/admin/consolidated_reports.php"><i class="fas fa-file-alt"></i>Generate Report</a>
-                <a class="t4" href="<?php echo APP_URL; ?>modules/admin/users.php"><i class="fas fa-users-cog"></i>Manage Users</a>
-                <a class="t5" href="<?php echo APP_URL; ?>modules/accounting/financial_reports.php"><i class="fas fa-chart-bar"></i>View Reports</a>
-                <a class="t6" href="<?php echo APP_URL; ?>modules/admin/settings.php"><i class="fas fa-cog"></i>System Settings</a>
+                <a class="t1" href="<?php echo APP_URL; ?>modules/projects/projects.php?action=add"><i class="fas fa-plus"></i>Encode Project</a>
+                <a class="t2" href="<?php echo APP_URL; ?>modules/accounting/quotations.php"><i class="fas fa-file-signature"></i>Project Quotation</a>
+                <a class="t3" href="<?php echo APP_URL; ?>modules/projects/projects.php"><i class="fas fa-tasks"></i>Project Monitoring</a>
+                <a class="t4" href="<?php echo APP_URL; ?>modules/admin/department_monitoring.php"><i class="fas fa-eye"></i>Department Status</a>
+                <a class="t5" href="<?php echo APP_URL; ?>modules/admin/consolidated_reports.php"><i class="fas fa-file-alt"></i>Consolidated Reports</a>
+                <a class="t6" href="<?php echo APP_URL; ?>modules/admin/users.php"><i class="fas fa-users-cog"></i>User & Role Management</a>
             </div>
         </div>
     </div>

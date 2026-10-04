@@ -5,10 +5,11 @@ require_once '../../includes/auth.php';
 requireDepartment(['accounting']);
 
 $page_title = 'Assign Project In-Charge';
+$selected_project = (int) ($_GET['project'] ?? 0);
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['assign_pic'])) {
-    if (!canAssignProjectInCharge()) {
-        $_SESSION['error'] = 'Administrators have view-only access.';
+        if (!canAssignProjectInCharge()) {
+        $_SESSION['error'] = 'You cannot assign an engineer.';
         header('Location: assign_in_charge.php');
         exit();
     }
@@ -46,7 +47,15 @@ try {
         LEFT JOIN users u ON p.in_charge_id = u.id
         ORDER BY (p.in_charge_id IS NULL) DESC, p.created_at DESC
     ")->fetchAll();
-    $engineers = $pdo->query("SELECT id, full_name, role FROM users WHERE department = 'engineering' AND status = 'active' ORDER BY full_name")->fetchAll();
+    $engineers = $pdo->query("
+        SELECT u.id, u.full_name, u.role,
+               COUNT(p.id) AS open_projects
+        FROM users u
+        LEFT JOIN projects p ON p.in_charge_id = u.id AND p.status IN ('assigned', 'planning', 'ongoing')
+        WHERE u.department = 'engineering' AND u.status = 'active'
+        GROUP BY u.id, u.full_name, u.role
+        ORDER BY open_projects ASC, u.full_name
+    ")->fetchAll();
 } catch (PDOException $e) {
     $error = userDatabaseError($e, 'Accounting');
 }
@@ -69,7 +78,27 @@ include '../../includes/header.php';
     <div class="alert alert-danger"><?php echo htmlspecialchars($error); ?></div>
 <?php endif; ?>
 
-<p class="muted-note">Accounting receives the encoded project from Executive Admin, records finances, then assigns an available Engineering / Project In-Charge.</p>
+<p class="muted-note">Accounting and Executive Admin can choose an available engineer. The list starts with whoever has the fewest open projects.</p>
+
+<div class="card">
+    <h3><i class="fas fa-chart-bar"></i> Engineer workload</h3>
+    <canvas id="engineerChart" height="90"></canvas>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<script>
+new Chart(document.getElementById('engineerChart'), {
+    type: 'bar',
+    data: {
+        labels: <?php echo json_encode(array_column($engineers, 'full_name')); ?>,
+        datasets: [{
+            label: 'Open projects',
+            data: <?php echo json_encode(array_map(static fn($e) => (int) $e['open_projects'], $engineers)); ?>,
+            backgroundColor: '#4e73df'
+        }]
+    },
+    options: { plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true, ticks: { precision: 0 } } } }
+});
+</script>
 
 <?php if (canAssignProjectInCharge()): ?>
 <div class="card">
@@ -80,7 +109,7 @@ include '../../includes/header.php';
             <select name="project_id" required>
                 <option value="">Select project</option>
                 <?php foreach ($projects as $project): ?>
-                    <option value="<?php echo (int)$project['id']; ?>">
+                    <option value="<?php echo (int)$project['id']; ?>" <?php echo (int) $project['id'] === $selected_project ? 'selected' : ''; ?>>
                         <?php echo htmlspecialchars($project['project_code'] . ' — ' . $project['name'] . ($project['in_charge_name'] ? ' (now: ' . $project['in_charge_name'] . ')' : ' — unassigned')); ?>
                     </option>
                 <?php endforeach; ?>
@@ -91,7 +120,7 @@ include '../../includes/header.php';
             <select name="in_charge_id" required>
                 <option value="">Select personnel</option>
                 <?php foreach ($engineers as $eng): ?>
-                    <option value="<?php echo (int)$eng['id']; ?>"><?php echo htmlspecialchars($eng['full_name'] . ' (' . $eng['role'] . ')'); ?></option>
+                    <option value="<?php echo (int)$eng['id']; ?>"><?php echo htmlspecialchars($eng['full_name'] . ' (' . $eng['role'] . ') — ' . (int) $eng['open_projects'] . ' open'); ?></option>
                 <?php endforeach; ?>
             </select>
         </div>

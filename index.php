@@ -41,10 +41,15 @@ $recent_accomplishments = [];
 $recent_department_activity = [];
 
 try {
+    try {
+        syncDepartmentWorkflow($pdo);
+    } catch (Throwable $e) {
+        error_log('[Runeha ERP] department sync: ' . $e->getMessage());
+    }
     // Project Statistics
     $stats['active_projects'] = $pdo->query("SELECT COUNT(*) FROM projects WHERE status IN ('planning', 'ongoing')")->fetchColumn() ?? 0;
     $stats['total_project_amount'] = $pdo->query("SELECT COALESCE(SUM(estimated_budget), 0) FROM projects")->fetchColumn() ?? 0;
-    $stats['total_project_expenses'] = $pdo->query("SELECT COALESCE(SUM(actual_cost), 0) FROM projects")->fetchColumn() ?? 0;
+    $stats['total_project_expenses'] = $pdo->query("SELECT COALESCE(SUM(amount), 0) FROM expenses WHERE status IN ('pending', 'paid')")->fetchColumn() ?? 0;
     
     // Financial Statistics
     try {
@@ -66,7 +71,7 @@ try {
         'color' => '#f59e0b',
         'total_prs' => $pdo->query("SELECT COUNT(*) FROM purchase_requests")->fetchColumn() ?? 0,
         'pending_prs' => $pdo->query("SELECT COUNT(*) FROM purchase_requests WHERE status = 'pending'")->fetchColumn() ?? 0,
-        'total_value' => $pdo->query("SELECT COALESCE(SUM(total_amount), 0) FROM purchase_requests WHERE status IN ('approved', 'confirmed', 'ordered', 'received')")->fetchColumn() ?? 0
+        'total_value' => $pdo->query("SELECT COALESCE(SUM(total_amount), 0) FROM purchase_requests WHERE status IN ('approved', 'confirmed', 'ordered', 'received', 'completed')")->fetchColumn() ?? 0
     ];
     
     $department_summaries['accounting'] = [

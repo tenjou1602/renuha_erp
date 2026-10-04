@@ -1,6 +1,7 @@
 <?php
 require_once '../../config/database.php';
 require_once '../../includes/auth.php';
+require_once '../../includes/accounting_ledger.php';
 
 requireAdmin();
 
@@ -10,13 +11,18 @@ $department = $_GET['department'] ?? 'all';
 // Get department data
 $department_data = [];
 try {
+    syncDepartmentWorkflow($pdo);
+} catch (Throwable $e) {
+    error_log('[Runeha ERP] department sync: ' . $e->getMessage());
+}
+try {
     switch ($department) {
         case 'procurement':
             $department_data['title'] = 'Procurement Monitoring';
             $department_data['total_prs'] = $pdo->query("SELECT COUNT(*) FROM purchase_requests")->fetchColumn() ?? 0;
             $department_data['pending_prs'] = $pdo->query("SELECT COUNT(*) FROM purchase_requests WHERE status = 'pending'")->fetchColumn() ?? 0;
             $department_data['approved_prs'] = $pdo->query("SELECT COUNT(*) FROM purchase_requests WHERE status = 'approved'")->fetchColumn() ?? 0;
-            $department_data['total_value'] = $pdo->query("SELECT COALESCE(SUM(total_amount), 0) FROM purchase_requests WHERE status IN ('approved', 'confirmed', 'ordered', 'received')")->fetchColumn() ?? 0;
+            $department_data['total_value'] = $pdo->query("SELECT COALESCE(SUM(total_amount), 0) FROM purchase_requests WHERE status IN ('approved', 'confirmed', 'ordered', 'received', 'completed')")->fetchColumn() ?? 0;
             $department_data['suppliers'] = $pdo->query("SELECT COUNT(*) FROM suppliers WHERE status = 'active'")->fetchColumn() ?? 0;
             $department_data['materials'] = $pdo->query("SELECT COUNT(*) FROM materials WHERE status = 'active'")->fetchColumn() ?? 0;
             
@@ -34,7 +40,7 @@ try {
             $department_data['title'] = 'Accounting Monitoring';
             $department_data['total_invoices'] = $pdo->query("SELECT COUNT(*) FROM invoices")->fetchColumn() ?? 0;
             $department_data['paid_invoices'] = $pdo->query("SELECT COUNT(*) FROM invoices WHERE status = 'paid'")->fetchColumn() ?? 0;
-            $department_data['total_expenses'] = $pdo->query("SELECT COALESCE(SUM(amount), 0) FROM expenses WHERE status = 'paid'")->fetchColumn() ?? 0;
+            $department_data['total_expenses'] = $pdo->query("SELECT COALESCE(SUM(amount), 0) FROM expenses WHERE status IN ('pending', 'paid')")->fetchColumn() ?? 0;
             $department_data['funds'] = 0;
             try {
                 $result = $pdo->query("SELECT COUNT(*) FROM funds WHERE status = 'active'");
@@ -53,16 +59,6 @@ try {
             } catch (PDOException $e) {
                 $department_data['contracts'] = 0;
             }
-            $department_data['labor_budgets'] = 0;
-            try {
-                $result = $pdo->query("SELECT COUNT(*) FROM labor_budgets WHERE status = 'active'");
-                if ($result) {
-                    $department_data['labor_budgets'] = $result->fetchColumn() ?? 0;
-                }
-            } catch (PDOException $e) {
-                $department_data['labor_budgets'] = 0;
-            }
-            
             $department_data['recent_invoices'] = $pdo->query("
                 SELECT inv.*, p.project_code
                 FROM invoices inv
@@ -70,6 +66,30 @@ try {
                 ORDER BY inv.created_at DESC
                 LIMIT 10
             ")->fetchAll();
+            $department_data['client_quotations'] = 0;
+            $department_data['approved_quotations'] = 0;
+            $department_data['ledger_ar'] = 0;
+            $department_data['ledger_cash'] = 0;
+            $department_data['ledger_revenue'] = 0;
+            $department_data['recent_quotations'] = [];
+            try {
+                $department_data['client_quotations'] = $pdo->query("SELECT COUNT(*) FROM client_quotations")->fetchColumn() ?? 0;
+                $department_data['approved_quotations'] = $pdo->query("SELECT COUNT(*) FROM client_quotations WHERE status = 'approved'")->fetchColumn() ?? 0;
+                $department_data['recent_quotations'] = $pdo->query("
+                    SELECT q.*, p.project_code
+                    FROM client_quotations q
+                    LEFT JOIN projects p ON q.project_id = p.id
+                    ORDER BY q.created_at DESC
+                    LIMIT 10
+                ")->fetchAll();
+                foreach (ledgerAccountBalances() as $balance) {
+                    if ($balance['code'] === RUNEHA_ACCT_AR) $department_data['ledger_ar'] = $balance['balance'];
+                    if ($balance['code'] === RUNEHA_ACCT_CASH) $department_data['ledger_cash'] = $balance['balance'];
+                    if ($balance['code'] === RUNEHA_ACCT_REVENUE) $department_data['ledger_revenue'] = $balance['balance'];
+                }
+            } catch (PDOException $e) {
+                $department_data['recent_quotations'] = [];
+            }
             break;
             
         case 'engineering':
@@ -139,6 +159,7 @@ try {
 }
 
 include '../../includes/header.php';
+$department = $_GET['department'] ?? 'all';
 ?>
 
 <style>
@@ -275,9 +296,25 @@ include '../../includes/header.php';
                 <div style="font-size:0.75rem;color:#64748b;">Active Contracts</div>
                 <div style="font-size:1.5rem;font-weight:700;"><?php echo number_format($department_data['contracts']); ?></div>
             </div>
-            <div class="card" style="border-left-color:#858796;margin:0;">
-                <div style="font-size:0.75rem;color:#64748b;">Labor Budgets</div>
-                <div style="font-size:1.5rem;font-weight:700;"><?php echo number_format($department_data['labor_budgets']); ?></div>
+            <div class="card" style="border-left-color:#6f42c1;margin:0;">
+                <div style="font-size:0.75rem;color:#64748b;">Client Quotations</div>
+                <div style="font-size:1.5rem;font-weight:700;"><?php echo number_format($department_data['client_quotations'] ?? 0); ?></div>
+            </div>
+            <div class="card" style="border-left-color:#f6c23e;margin:0;">
+                <div style="font-size:0.75rem;color:#64748b;">Approved, Not Invoiced</div>
+                <div style="font-size:1.5rem;font-weight:700;"><?php echo number_format($department_data['approved_quotations'] ?? 0); ?></div>
+            </div>
+            <div class="card" style="border-left-color:#4e73df;margin:0;">
+                <div style="font-size:0.75rem;color:#64748b;">Ledger AR</div>
+                <div class="stat-amount">₱<?php echo number_format($department_data['ledger_ar'] ?? 0, 2); ?></div>
+            </div>
+            <div class="card" style="border-left-color:#1cc88a;margin:0;">
+                <div style="font-size:0.75rem;color:#64748b;">Ledger Cash</div>
+                <div class="stat-amount">₱<?php echo number_format($department_data['ledger_cash'] ?? 0, 2); ?></div>
+            </div>
+            <div class="card" style="border-left-color:#36b9cc;margin:0;">
+                <div style="font-size:0.75rem;color:#64748b;">Ledger Revenue</div>
+                <div class="stat-amount">₱<?php echo number_format($department_data['ledger_revenue'] ?? 0, 2); ?></div>
             </div>
         <?php elseif ($department === 'engineering'): ?>
             <div class="card" style="border-left-color:#4e73df;margin:0;">
@@ -363,7 +400,39 @@ include '../../includes/header.php';
                 </tbody>
             </table>
         </div>
-    <?php elseif ($department === 'accounting' && !empty($department_data['recent_invoices'])): ?>
+    <?php elseif ($department === 'accounting' && (!empty($department_data['recent_quotations']) || !empty($department_data['recent_invoices']))): ?>
+        <?php if (!empty($department_data['recent_quotations'])): ?>
+        <h4 style="margin-bottom:0.75rem;">Recent Client Quotations</h4>
+        <p style="color:#64748b;margin-top:0;">Quotations are proposals. They are not income until converted to an invoice.</p>
+        <div class="table-responsive">
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th>Quotation #</th>
+                        <th>Client</th>
+                        <th>Project</th>
+                        <th>Grand Total</th>
+                        <th>Status</th>
+                        <th>Date</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <?php foreach ($department_data['recent_quotations'] as $quote): ?>
+                    <tr>
+                        <td><strong><?php echo htmlspecialchars($quote['quotation_number']); ?></strong></td>
+                        <td><?php echo htmlspecialchars($quote['client_name']); ?></td>
+                        <td><?php echo htmlspecialchars($quote['project_code'] ?? 'N/A'); ?></td>
+                        <td>₱<?php echo number_format($quote['grand_total'], 2); ?></td>
+                        <td><span class="badge badge-<?php echo htmlspecialchars($quote['status']); ?>"><?php echo ucfirst($quote['status']); ?></span></td>
+                        <td><?php echo date('M d, Y', strtotime($quote['created_at'])); ?></td>
+                    </tr>
+                    <?php endforeach; ?>
+                </tbody>
+            </table>
+        </div>
+        <?php endif; ?>
+        <?php if (!empty($department_data['recent_invoices'])): ?>
+        <h4 style="margin:1.25rem 0 0.75rem;">Recent Invoices</h4>
         <div class="table-responsive">
             <table class="table">
                 <thead>
@@ -390,6 +459,7 @@ include '../../includes/header.php';
                 </tbody>
             </table>
         </div>
+        <?php endif; ?>
     <?php elseif ($department === 'engineering' && !empty($department_data['recent_projects'])): ?>
         <div class="table-responsive">
             <table class="table">

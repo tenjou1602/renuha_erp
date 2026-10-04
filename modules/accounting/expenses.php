@@ -57,6 +57,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
+if (isset($_GET['delete_id']) && $action === 'delete') {
+    if (!canWriteDepartmentData('accounting')) {
+        $_SESSION['error'] = 'Administrators have view-only access.';
+        header('Location: expenses.php');
+        exit();
+    }
+    $delete_id = (int) $_GET['delete_id'];
+    try {
+        $stmt = $pdo->prepare("DELETE FROM expenses WHERE id = ?");
+        $stmt->execute([$delete_id]);
+        logActivity($_SESSION['user_id'], 'Deleted expense', 'Accounting', "Expense ID: $delete_id");
+        $_SESSION['success'] = 'Expense deleted.';
+    } catch (PDOException $e) {
+        $_SESSION['error'] = userDatabaseError($e);
+    }
+    header('Location: expenses.php');
+    exit();
+}
+
+syncPurchasedMaterialsToAccounting($pdo);
+
 // Get projects for dropdown
 $projects = $pdo->query("SELECT id, name, project_code FROM projects ORDER BY name")->fetchAll();
 
@@ -258,6 +279,7 @@ include '../../includes/header.php';
                             <?php if ($exp['status'] === 'pending'): ?>
                                 <?php if (canWriteDepartmentData('accounting')): ?><a href="?action=edit&id=<?php echo $exp['id']; ?>" class="btn btn-sm btn-warning"><i class="fas fa-edit"></i></a><?php endif; ?>
                             <?php endif; ?>
+                            <?php if (canWriteDepartmentData('accounting')): ?><a href="?action=delete&delete_id=<?php echo (int) $exp['id']; ?>" class="btn btn-sm btn-danger" onclick="return confirm('Delete this expense?')"><i class="fas fa-trash"></i></a><?php endif; ?>
                         </td>
                     </tr>
                     <?php endforeach; ?>

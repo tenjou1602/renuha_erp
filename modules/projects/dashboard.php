@@ -21,6 +21,11 @@ $recent_projects = [];
 $recent_accomplishments = [];
 
 try {
+    try {
+        syncDepartmentWorkflow($pdo);
+    } catch (Throwable $e) {
+        error_log('[Runeha ERP] department sync: ' . $e->getMessage());
+    }
     $stats['active_projects'] = $pdo->query("SELECT COUNT(*) FROM projects WHERE status IN ('planning', 'ongoing')")->fetchColumn() ?? 0;
     $stats['upcoming_projects'] = $pdo->query("SELECT COUNT(*) FROM projects WHERE status = 'planning' AND start_date > CURDATE()")->fetchColumn() ?? 0;
     $stats['ongoing_projects'] = $pdo->query("SELECT COUNT(*) FROM projects WHERE status = 'ongoing'")->fetchColumn() ?? 0;
@@ -42,7 +47,22 @@ try {
         $stats['attachments'] = 0;
     }
 
-    $stats['material_requirements'] = $pdo->query("SELECT COUNT(*) FROM materials WHERE current_stock <= min_stock AND min_stock > 0 AND status = 'active'")->fetchColumn() ?? 0;
+    $stats['material_requirements'] = $pdo->query("SELECT COUNT(*) FROM purchase_requests WHERE status IN ('pending', 'approved', 'confirmed')")->fetchColumn() ?? 0;
+    $stats['materials_received'] = $pdo->query("SELECT COUNT(*) FROM purchase_requests WHERE status IN ('received', 'completed')")->fetchColumn() ?? 0;
+    $stats['assigned_projects'] = $stats['active_projects'];
+    try {
+        $stats['project_progress'] = $pdo->query("SELECT COALESCE(AVG(completion_percentage), 0) FROM accomplishments")->fetchColumn() ?? 0;
+    } catch (PDOException $e) {
+        $stats['project_progress'] = 0;
+    }
+    if (!isAdmin()) {
+        $assignedStmt = $pdo->prepare("SELECT COUNT(*) FROM projects WHERE assigned_to = ? OR in_charge_id = ?");
+        $assignedStmt->execute([$_SESSION['user_id'], $_SESSION['user_id']]);
+        $stats['assigned_projects'] = $assignedStmt->fetchColumn() ?? 0;
+        $requestStmt = $pdo->prepare("SELECT COUNT(*) FROM purchase_requests WHERE requestor_id = ? AND status IN ('pending', 'approved', 'confirmed')");
+        $requestStmt->execute([$_SESSION['user_id']]);
+        $stats['material_requirements'] = $requestStmt->fetchColumn() ?? 0;
+    }
     if (isAdmin()) {
         $recent_projects = $pdo->query("SELECT id, project_code, name, status, location, start_date, end_date, in_charge_id FROM projects ORDER BY created_at DESC LIMIT 8")->fetchAll();
     } else {
@@ -75,12 +95,12 @@ include '../../includes/header.php';
         <div>
             <p class="dept-kicker">Engineering Department</p>
             <h1><i class="fas fa-hard-hat"></i> Engineering Dashboard</h1>
-            <p class="dept-sub">Plan projects, track progress, and prepare material requirements.</p>
+            <p class="dept-sub">Assigned projects, progress, material requests, and completed work.</p>
         </div>
         <div class="dept-actions">
-            <a href="material_requirements.php" class="btn btn-primary"><i class="fas fa-clipboard-list"></i> Material Requirements</a>
-            <a href="<?php echo APP_URL; ?>modules/procurement/purchase_requests.php?action=add" class="btn btn-outline"><i class="fas fa-file-invoice"></i> Submit to Procurement</a>
-            <a href="accomplishments.php" class="btn btn-outline"><i class="fas fa-check-circle"></i> Accomplishments</a>
+            <a href="received_projects.php" class="btn btn-primary"><i class="fas fa-inbox"></i> Received Projects</a>
+            <a href="material_requirements.php" class="btn btn-outline"><i class="fas fa-clipboard-list"></i> Project Requirements</a>
+            <a href="accomplishments.php" class="btn btn-outline"><i class="fas fa-clipboard-check"></i> Progress Updates</a>
         </div>
     </div>
 
@@ -89,16 +109,37 @@ include '../../includes/header.php';
     <?php endif; ?>
 
     <div class="dept-kpis">
-        <div class="dept-kpi green"><div class="ico"><i class="fas fa-play-circle"></i></div><div><div class="num"><?php echo number_format($stats['ongoing_projects']); ?></div><div class="lbl">Ongoing</div></div></div>
-        <div class="dept-kpi blue"><div class="ico"><i class="fas fa-building"></i></div><div><div class="num"><?php echo number_format($stats['active_projects']); ?></div><div class="lbl">Active Projects</div></div></div>
-        <div class="dept-kpi orange"><div class="ico"><i class="fas fa-clock"></i></div><div><div class="num"><?php echo number_format($stats['upcoming_projects']); ?></div><div class="lbl">Upcoming</div></div></div>
-        <div class="dept-kpi purple"><div class="ico"><i class="fas fa-check-circle"></i></div><div><div class="num"><?php echo number_format($stats['completed_projects']); ?></div><div class="lbl">Completed</div></div></div>
-        <div class="dept-kpi teal"><div class="ico"><i class="fas fa-coins"></i></div><div><div class="num">₱<?php echo number_format((float) $stats['total_budget'], 2); ?></div><div class="lbl">Total Budget</div></div></div>
-        <div class="dept-kpi red"><div class="ico"><i class="fas fa-receipt"></i></div><div><div class="num">₱<?php echo number_format((float) $stats['actual_cost'], 2); ?></div><div class="lbl">Actual Cost</div></div></div>
-        <div class="dept-kpi sky"><div class="ico"><i class="fas fa-clipboard-check"></i></div><div><div class="num"><?php echo number_format($stats['accomplishments']); ?></div><div class="lbl">Accomplishments</div></div></div>
-        <div class="dept-kpi slate"><div class="ico"><i class="fas fa-paperclip"></i></div><div><div class="num"><?php echo number_format($stats['attachments']); ?></div><div class="lbl">Attachments</div></div></div>
-        <div class="dept-kpi orange"><div class="ico"><i class="fas fa-boxes"></i></div><div><div class="num"><?php echo number_format($stats['material_requirements']); ?></div><div class="lbl">Low Stock Materials</div></div></div>
+        <a class="dept-kpi blue" href="received_projects.php"><div class="ico"><i class="fas fa-inbox"></i></div><div><div class="num"><?php echo number_format($stats['assigned_projects']); ?></div><div class="lbl">Received Projects</div></div></a>
+        <a class="dept-kpi sky" href="accomplishments.php"><div class="ico"><i class="fas fa-clipboard-check"></i></div><div><div class="num"><?php echo number_format((float) $stats['project_progress'], 0); ?>%</div><div class="lbl">Project Progress</div></div></a>
+        <a class="dept-kpi orange" href="received_projects.php?view=requests"><div class="ico"><i class="fas fa-paper-plane"></i></div><div><div class="num"><?php echo number_format($stats['material_requirements']); ?></div><div class="lbl">Material Requests</div></div></a>
+        <a class="dept-kpi green" href="received_projects.php?view=requests"><div class="ico"><i class="fas fa-boxes"></i></div><div><div class="num"><?php echo number_format($stats['materials_received']); ?></div><div class="lbl">Materials Received</div></div></a>
+        <a class="dept-kpi purple" href="project_details.php"><div class="ico"><i class="fas fa-hard-hat"></i></div><div><div class="num"><?php echo number_format($stats['ongoing_projects']); ?> / <?php echo number_format($stats['completed_projects']); ?></div><div class="lbl">Ongoing & Completed Projects</div></div></a>
     </div>
+
+    <div class="card">
+        <h3><i class="fas fa-chart-bar"></i> Project monitoring</h3>
+        <canvas id="engChart" height="80"></canvas>
+    </div>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+    <script>
+    new Chart(document.getElementById('engChart'), {
+        type: 'bar',
+        data: {
+            labels: ['Received', 'Material requests', 'Materials received', 'Ongoing', 'Completed'],
+            datasets: [{
+                data: [
+                    <?php echo (int) $stats['assigned_projects']; ?>,
+                    <?php echo (int) $stats['material_requirements']; ?>,
+                    <?php echo (int) $stats['materials_received']; ?>,
+                    <?php echo (int) $stats['ongoing_projects']; ?>,
+                    <?php echo (int) $stats['completed_projects']; ?>
+                ],
+                backgroundColor: ['#4e73df', '#f6c23e', '#1cc88a', '#36b9cc', '#858796']
+            }]
+        },
+        options: { plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true, ticks: { precision: 0 } } } }
+    });
+    </script>
 
     <div class="dept-grid">
         <div class="dept-panel">
@@ -127,10 +168,10 @@ include '../../includes/header.php';
         <div class="dept-panel">
             <h3><i class="fas fa-bolt"></i> Quick Actions</h3>
             <div class="dept-qa">
-                <a class="t1" href="projects.php"><i class="fas fa-tasks"></i>Manage Projects</a>
-                <a class="t2" href="material_requirements.php"><i class="fas fa-boxes"></i>Material Requirements</a>
-                <a class="t3" href="accomplishments.php"><i class="fas fa-clipboard-check"></i>Accomplishments</a>
-                <a class="t4" href="project_reports.php"><i class="fas fa-chart-bar"></i>Project Reports</a>
+                <a class="t1" href="received_projects.php"><i class="fas fa-inbox"></i>Received Projects</a>
+                <a class="t2" href="project_details.php"><i class="fas fa-drafting-compass"></i>Project Planning</a>
+                <a class="t3" href="material_requirements.php"><i class="fas fa-clipboard-list"></i>Project Requirements</a>
+                <a class="t4" href="project_reports.php"><i class="fas fa-chart-bar"></i>Accomplishment Reports</a>
             </div>
             <?php if (!empty($recent_accomplishments)): ?>
             <h3 style="margin-top:1.1rem;"><i class="fas fa-clipboard-check"></i> Recent Accomplishments</h3>

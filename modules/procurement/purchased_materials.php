@@ -22,7 +22,7 @@ try {
             m.current_stock,
             m.cost_per_unit,
             m.category,
-            s.name as supplier_name,
+            COALESCE(NULLIF(s.name, ''), NULLIF(m.supplier, '')) as supplier_name,
             COALESCE(SUM(CASE WHEN sm.movement_type = 'in' THEN sm.quantity ELSE 0 END), 0) as total_received,
             COALESCE(SUM(CASE WHEN sm.movement_type = 'out' THEN sm.quantity ELSE 0 END), 0) as total_issued,
             COUNT(DISTINCT po.id) as purchase_count
@@ -33,8 +33,11 @@ try {
         LEFT JOIN purchase_requests pr ON pri.purchase_request_id = pr.id
         LEFT JOIN purchase_orders po ON pr.id = po.purchase_request_id AND po.status = 'delivered'
         WHERE m.status = 'active'
-        GROUP BY m.id, m.material_code, m.name, m.unit, m.current_stock, m.cost_per_unit, m.category, s.name
-        HAVING total_received > 0 OR purchase_count > 0
+        GROUP BY m.id, m.material_code, m.name, m.unit, m.current_stock, m.cost_per_unit, m.category, s.name, m.supplier
+        HAVING COALESCE(SUM(CASE WHEN sm.movement_type = 'in' THEN sm.quantity ELSE 0 END), 0) > 0
+            OR COUNT(DISTINCT po.id) > 0
+            OR m.current_stock > 0
+            OR COUNT(sm.id) > 0
         ORDER BY total_received DESC, m.name ASC
     ";
     $purchased_materials = $pdo->query($query)->fetchAll();
@@ -56,7 +59,7 @@ $material_history = [];
 if ($action === 'view' && $id > 0) {
     try {
         $stmt = $pdo->prepare("
-            SELECT m.*, s.name as supplier_name, s.contact_person, s.phone, s.email
+            SELECT m.*, COALESCE(NULLIF(s.name, ''), NULLIF(m.supplier, '')) as supplier_name, s.contact_person, s.phone, s.email
             FROM materials m
             LEFT JOIN suppliers s ON m.supplier_id = s.id
             WHERE m.id = ?
@@ -111,6 +114,8 @@ include '../../includes/header.php';
     <div style="display:flex;gap:0.5rem;flex-wrap:wrap;">
         <a href="materials.php" class="btn btn-info"><i class="fas fa-cubes"></i> View All Materials</a>
         <a href="purchase_history.php" class="btn btn-primary"><i class="fas fa-history"></i> Purchase History</a>
+        <a href="reports.php" class="btn btn-outline"><i class="fas fa-chart-bar"></i> Reports</a>
+        <a href="<?php echo APP_URL; ?>modules/warehouse/receive_purchases.php" class="btn btn-success"><i class="fas fa-truck-loading"></i> Send to Warehouse</a>
     </div>
 </div>
 

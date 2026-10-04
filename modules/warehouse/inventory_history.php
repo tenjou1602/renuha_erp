@@ -5,7 +5,7 @@ require_once '../../includes/auth.php';
 requireDepartment(['warehouse']);
 
 $page_title = 'Inventory History';
-$start_date = $_GET['start_date'] ?? date('Y-m-01');
+$start_date = $_GET['start_date'] ?? date('Y-01-01');
 $end_date = $_GET['end_date'] ?? date('Y-m-t');
 $material_id = (int)($_GET['material_id'] ?? 0);
 $movement_type = $_GET['movement_type'] ?? '';

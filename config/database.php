@@ -115,6 +115,7 @@ function nextHyphenSequence($table, $column, $like, $max_sane = 999999) {
         'expenses' => 'expense_number',
         'payments' => 'payment_number',
         'quotations' => 'quotation_number',
+        'client_quotations' => 'quotation_number',
         'projects' => 'project_code',
         'contracts' => 'contract_number',
         'materials' => 'material_code',
@@ -139,6 +140,12 @@ function nextHyphenSequence($table, $column, $like, $max_sane = 999999) {
     } catch (PDOException $e) {
         return 1;
     }
+}
+
+function generateYearlyNumber($prefix, $table, $column) {
+    $year = date('Y');
+    $seq = nextHyphenSequence($table, $column, $prefix . '-' . $year . '-%', 9999);
+    return $prefix . '-' . $year . '-' . str_pad((string) $seq, 3, '0', STR_PAD_LEFT);
 }
 
 function generateProjectCode() {
@@ -276,5 +283,101 @@ function ensureRunehaWorkflowSchema() {
         }
     } catch (PDOException $e) {
         error_log('[Runeha ERP] workflow schema received_at: ' . $e->getMessage());
+    }
+    require_once __DIR__ . '/../includes/accounting_ledger.php';
+    ensureClientAccountingSchema();
+    foreach ([
+        'source_quotation_id' => 'source_quotation_id BIGINT UNSIGNED NULL',
+        'source_contract_id' => 'source_contract_id BIGINT UNSIGNED NULL',
+        'quotation_path' => 'quotation_path VARCHAR(255) NULL',
+        'quotation_name' => 'quotation_name VARCHAR(255) NULL',
+        'subject' => 'subject TEXT NULL',
+        'accounting_received_at' => 'accounting_received_at DATETIME NULL',
+        'engineering_received_at' => 'engineering_received_at DATETIME NULL',
+        'material_cost' => 'material_cost DECIMAL(15,2) NOT NULL DEFAULT 0.00',
+        'labor_cost' => 'labor_cost DECIMAL(15,2) NOT NULL DEFAULT 0.00',
+    ] as $name => $ddl) {
+        try {
+            $col = $pdo->query("SHOW COLUMNS FROM projects LIKE " . $pdo->quote($name))->fetch();
+            if (!$col) {
+                $pdo->exec("ALTER TABLE projects ADD COLUMN $ddl");
+            }
+        } catch (PDOException $e) {
+            error_log('[Runeha ERP] workflow schema ' . $name . ': ' . $e->getMessage());
+        }
+    }
+    try {
+        $col = $pdo->query("SHOW COLUMNS FROM quotations LIKE 'purchase_request_id'")->fetch();
+        if (!$col) {
+            $pdo->exec("ALTER TABLE quotations ADD COLUMN purchase_request_id BIGINT UNSIGNED NULL AFTER project_id");
+            $pdo->exec("ALTER TABLE quotations ADD KEY idx_quotations_pr (purchase_request_id)");
+        }
+    } catch (PDOException $e) {
+        error_log('[Runeha ERP] workflow schema quotations.purchase_request_id: ' . $e->getMessage());
+    }
+    try {
+        $pdo->exec("CREATE TABLE IF NOT EXISTS quotation_items (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            quotation_id BIGINT UNSIGNED NOT NULL,
+            purchase_request_item_id BIGINT UNSIGNED NOT NULL,
+            material_id BIGINT UNSIGNED NOT NULL,
+            quantity INT UNSIGNED NOT NULL DEFAULT 1,
+            unit VARCHAR(30) NOT NULL DEFAULT 'pcs',
+            unit_price DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+            PRIMARY KEY (id),
+            KEY idx_qi_quotation (quotation_id),
+            KEY idx_qi_pr_item (purchase_request_item_id),
+            KEY idx_qi_material (material_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+    } catch (PDOException $e) {
+        error_log('[Runeha ERP] workflow schema quotation_items: ' . $e->getMessage());
+    }
+    try {
+        $pdo->exec("ALTER TABLE purchase_requests MODIFY status ENUM('draft','pending','approved','confirmed','rejected','ordered','received','completed') NOT NULL DEFAULT 'pending'");
+    } catch (PDOException $e) {
+        error_log('[Runeha ERP] workflow schema purchase request completed: ' . $e->getMessage());
+    }
+    try {
+        $pdo->exec("CREATE TABLE IF NOT EXISTS project_quotation_items (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            project_id BIGINT UNSIGNED NOT NULL,
+            item_name VARCHAR(255) NOT NULL,
+            description TEXT NULL,
+            quantity DECIMAL(12,2) NOT NULL DEFAULT 1.00,
+            unit VARCHAR(50) NULL,
+            unit_price DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+            line_type ENUM('material','labor','other') NOT NULL DEFAULT 'other',
+            PRIMARY KEY (id),
+            KEY idx_pqi_project (project_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+    } catch (PDOException $e) {
+        error_log('[Runeha ERP] workflow schema project_quotation_items: ' . $e->getMessage());
+    }
+    syncProjectActualCosts();
+}
+
+function syncProjectActualCosts(): void {
+    global $pdo;
+    if (!isset($pdo)) {
+        return;
+    }
+    try {
+        $pdo->exec("UPDATE projects p
+            LEFT JOIN (
+                SELECT project_id, SUM(amount) AS total
+                FROM expenses
+                WHERE status IN ('pending', 'paid') AND project_id IS NOT NULL AND project_id > 0
+                GROUP BY project_id
+            ) e ON e.project_id = p.id
+            LEFT JOIN (
+                SELECT b.project_id, COALESCE(SUM(l.line_total), 0) AS total
+                FROM labor_budgets b
+                INNER JOIN labor_budget_lines l ON l.labor_budget_id = b.id
+                WHERE b.status = 'active' AND b.project_id IS NOT NULL
+                GROUP BY b.project_id
+            ) w ON w.project_id = p.id
+            SET p.actual_cost = COALESCE(e.total, 0) + COALESCE(w.total, 0)");
+    } catch (PDOException $e) {
+        error_log('[Runeha ERP] sync project actual cost: ' . $e->getMessage());
     }
 }

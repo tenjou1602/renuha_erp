@@ -57,6 +57,7 @@ include '../../includes/header.php';
                         <td>
                             <strong><?php echo htmlspecialchars($movement['material_name'] ?? 'N/A'); ?></strong>
                             <br><small><?php echo htmlspecialchars($movement['material_code'] ?? ''); ?></small>
+                            <br><a href="inventory_history.php?material_id=<?php echo (int) $movement['material_id']; ?>">History</a>
                         </td>
                         <td>
                             <span class="badge badge-<?php echo $movement['movement_type'] === 'in' ? 'success' : ($movement['movement_type'] === 'out' ? 'danger' : 'warning'); ?>">

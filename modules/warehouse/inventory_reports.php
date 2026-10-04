@@ -6,33 +6,69 @@ requireDepartment(['warehouse']);
 
 $page_title = 'Inventory Reports';
 $report_type = $_GET['report'] ?? 'overview';
-$start_date = $_GET['start_date'] ?? date('Y-m-01');
+$start_date = $_GET['start_date'] ?? date('Y-01-01');
 $end_date = $_GET['end_date'] ?? date('Y-m-t');
+if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $start_date)) {
+    $start_date = date('Y-01-01');
+}
+if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $end_date)) {
+    $end_date = date('Y-m-t');
+}
+$period_end = $end_date . ' 23:59:59';
 
 // Report data
 $report_data = [];
 try {
     switch ($report_type) {
         case 'overview':
-            // General inventory overview
-            $report_data['total_items'] = $pdo->query("SELECT COUNT(*) FROM materials WHERE status = 'active'")->fetchColumn() ?? 0;
+            $itemStmt = $pdo->prepare("SELECT COUNT(DISTINCT material_id) FROM stock_movements WHERE created_at BETWEEN ? AND ?");
+            $itemStmt->execute([$start_date, $period_end]);
+            $report_data['total_items'] = $itemStmt->fetchColumn() ?? 0;
+
+            $valueStmt = $pdo->prepare("
+                SELECT COALESCE(SUM(m.current_stock * m.cost_per_unit), 0)
+                FROM materials m
+                WHERE m.status = 'active'
+                  AND m.id IN (
+                    SELECT DISTINCT material_id FROM stock_movements WHERE created_at BETWEEN ? AND ?
+                  )
+            ");
+            $valueStmt->execute([$start_date, $period_end]);
+            $report_data['total_value'] = $valueStmt->fetchColumn() ?? 0;
+
+            $report_data['low_stock'] = $pdo->query("SELECT COUNT(*) FROM materials WHERE status = 'active' AND min_stock > 0 AND current_stock <= min_stock")->fetchColumn() ?? 0;
             $report_data['total_stock'] = $pdo->query("SELECT COALESCE(SUM(current_stock), 0) FROM materials WHERE status = 'active'")->fetchColumn() ?? 0;
-            $report_data['total_value'] = $pdo->query("SELECT COALESCE(SUM(current_stock * cost_per_unit), 0) FROM materials WHERE status = 'active'")->fetchColumn() ?? 0;
-            $report_data['low_stock'] = $pdo->query("SELECT COUNT(*) FROM materials WHERE current_stock <= min_stock AND min_stock > 0 AND status = 'active'")->fetchColumn() ?? 0;
-            
-            // Stock movement trends
-            $report_data['movement_trend'] = $pdo->query("
-                SELECT DATE_FORMAT(created_at, '%b %Y') as month, 
+
+            $trendStmt = $pdo->prepare("
+                SELECT DATE_FORMAT(created_at, '%b %Y') as month,
                        movement_type,
-                       COUNT(*) as count,
                        COALESCE(SUM(quantity), 0) as total_quantity
                 FROM stock_movements
-                WHERE created_at BETWEEN DATE_SUB('$start_date', INTERVAL 5 MONTH) AND '$end_date 23:59:59'
+                WHERE created_at BETWEEN ? AND ?
                 GROUP BY YEAR(created_at), MONTH(created_at), month, movement_type
                 ORDER BY YEAR(created_at), MONTH(created_at)
-            ")->fetchAll();
-            
-            // Material category breakdown
+            ");
+            $trendStmt->execute([$start_date, $period_end]);
+            $report_data['movement_trend'] = $trendStmt->fetchAll();
+            $report_data['trend_months'] = [];
+            $report_data['trend_in'] = [];
+            $report_data['trend_out'] = [];
+            foreach ($report_data['movement_trend'] as $row) {
+                $month = $row['month'];
+                if (!isset($report_data['trend_months'][$month])) {
+                    $report_data['trend_months'][$month] = count($report_data['trend_in']);
+                    $report_data['trend_in'][] = 0;
+                    $report_data['trend_out'][] = 0;
+                }
+                $index = $report_data['trend_months'][$month];
+                if ($row['movement_type'] === 'in') {
+                    $report_data['trend_in'][$index] = (float) $row['total_quantity'];
+                } elseif ($row['movement_type'] === 'out') {
+                    $report_data['trend_out'][$index] = (float) $row['total_quantity'];
+                }
+            }
+            $report_data['trend_months'] = array_keys($report_data['trend_months']);
+
             $report_data['category_breakdown'] = $pdo->query("
                 SELECT category, COUNT(*) as count, COALESCE(SUM(current_stock * cost_per_unit), 0) as total_value
                 FROM materials
@@ -47,7 +83,7 @@ try {
             $report_data['stock_in'] = $pdo->query("
                 SELECT DATE_FORMAT(created_at, '%b %Y') as month, COUNT(*) as count, COALESCE(SUM(quantity), 0) as total_quantity
                 FROM stock_movements
-                WHERE movement_type = 'in' AND created_at BETWEEN DATE_SUB('$start_date', INTERVAL 5 MONTH) AND '$end_date 23:59:59'
+                WHERE movement_type = 'in' AND created_at BETWEEN '$start_date' AND '$period_end'
                 GROUP BY YEAR(created_at), MONTH(created_at), month
                 ORDER BY YEAR(created_at), MONTH(created_at)
             ")->fetchAll();
@@ -55,7 +91,7 @@ try {
             $report_data['stock_out'] = $pdo->query("
                 SELECT DATE_FORMAT(created_at, '%b %Y') as month, COUNT(*) as count, COALESCE(SUM(quantity), 0) as total_quantity
                 FROM stock_movements
-                WHERE movement_type = 'out' AND created_at BETWEEN DATE_SUB('$start_date', INTERVAL 5 MONTH) AND '$end_date 23:59:59'
+                WHERE movement_type = 'out' AND created_at BETWEEN '$start_date' AND '$period_end'
                 GROUP BY YEAR(created_at), MONTH(created_at), month
                 ORDER BY YEAR(created_at), MONTH(created_at)
             ")->fetchAll();
@@ -67,7 +103,7 @@ try {
                        COALESCE(SUM(CASE WHEN sm.movement_type = 'in' THEN sm.quantity ELSE 0 END), 0) as total_in,
                        COALESCE(SUM(CASE WHEN sm.movement_type = 'out' THEN sm.quantity ELSE 0 END), 0) as total_out
                 FROM materials m
-                LEFT JOIN stock_movements sm ON m.id = sm.material_id AND sm.created_at BETWEEN '$start_date' AND '$end_date 23:59:59'
+                LEFT JOIN stock_movements sm ON m.id = sm.material_id AND sm.created_at BETWEEN '$start_date' AND '$period_end'
                 WHERE m.status = 'active'
                 GROUP BY m.id, m.material_code, m.name, m.unit
                 HAVING movement_count > 0
@@ -80,7 +116,7 @@ try {
             // Low stock analysis
             $report_data['low_stock_materials'] = $pdo->query("
                 SELECT m.material_code, m.name, m.unit, m.current_stock, m.min_stock, m.max_stock, m.cost_per_unit,
-                       s.name as supplier_name,
+                       COALESCE(NULLIF(s.name, ''), NULLIF(m.supplier, '')) as supplier_name,
                        (m.min_stock - m.current_stock) as shortage,
                        COUNT(DISTINCT pr.id) as pr_count
                 FROM materials m
@@ -88,7 +124,7 @@ try {
                 LEFT JOIN purchase_request_items pri ON m.id = pri.material_id
                 LEFT JOIN purchase_requests pr ON pri.purchase_request_id = pr.id AND pr.status IN ('pending', 'approved', 'confirmed')
                 WHERE m.status = 'active' AND m.current_stock <= m.min_stock AND m.min_stock > 0
-                GROUP BY m.id, m.material_code, m.name, m.unit, m.current_stock, m.min_stock, m.max_stock, m.cost_per_unit, s.name
+                GROUP BY m.id, m.material_code, m.name, m.unit, m.current_stock, m.min_stock, m.max_stock, m.cost_per_unit, s.name, m.supplier
                 ORDER BY shortage DESC
             ")->fetchAll();
             
@@ -235,19 +271,19 @@ include '../../includes/header.php';
 <div class="stat-cards">
     <div class="stat-card">
         <div class="value"><?php echo number_format($report_data['total_items'] ?? 0); ?></div>
-        <div class="label">Total Items</div>
+        <div class="label">Total Items in this period</div>
     </div>
     <div class="stat-card" style="border-left-color:#36b9cc;">
         <div class="value"><?php echo number_format($report_data['total_stock'] ?? 0); ?></div>
-        <div class="label">Total Stock</div>
+        <div class="label">On-hand quantity</div>
     </div>
     <div class="stat-card" style="border-left-color:#1cc88a;">
         <div class="value">₱<?php echo number_format($report_data['total_value'] ?? 0, 2); ?></div>
-        <div class="label">Total Value</div>
+        <div class="label">Total Value of items in this period</div>
     </div>
     <div class="stat-card" style="border-left-color:#e74a3b;">
         <div class="value"><?php echo number_format($report_data['low_stock'] ?? 0); ?></div>
-        <div class="label">Low Stock Items</div>
+        <div class="label">Low Stock Items now</div>
     </div>
 </div>
 
@@ -270,15 +306,9 @@ include '../../includes/header.php';
 <script>
 const movementTrendCtx = document.getElementById('movementTrendChart');
 if (movementTrendCtx) {
-    const months = [...new Set(<?php echo json_encode(array_column($report_data['movement_trend'] ?? [], 'month')); ?>)];
-    const stockInData = months.map(m => <?php echo json_encode(array_column($report_data['movement_trend'] ?? [], 'total_quantity')); ?>.reduce((sum, val, i) => {
-        const trend = <?php echo json_encode($report_data['movement_trend'] ?? []); ?>;
-        return trend[i]?.movement_type === 'in' ? sum + val : sum;
-    }, 0));
-    const stockOutData = months.map(m => <?php echo json_encode(array_column($report_data['movement_trend'] ?? [], 'total_quantity')); ?>.reduce((sum, val, i) => {
-        const trend = <?php echo json_encode($report_data['movement_trend'] ?? []); ?>;
-        return trend[i]?.movement_type === 'out' ? sum + val : sum;
-    }, 0));
+    const months = <?php echo json_encode(array_values($report_data['trend_months'] ?? [])); ?>;
+    const stockInData = <?php echo json_encode(array_values($report_data['trend_in'] ?? [])); ?>;
+    const stockOutData = <?php echo json_encode(array_values($report_data['trend_out'] ?? [])); ?>;
     
     new Chart(movementTrendCtx, {
         type: 'line',

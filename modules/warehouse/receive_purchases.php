@@ -1,8 +1,16 @@
 <?php
 require_once '../../config/database.php';
 require_once '../../includes/auth.php';
+require_once '../../includes/warehouse_fifo.php';
+require_once '../../includes/warehouse_release.php';
 
 requireDepartment(['warehouse']);
+
+try {
+    ensureWarehouseFifoSchema($pdo);
+} catch (PDOException $e) {
+    error_log('[Runeha ERP] fifo schema: ' . $e->getMessage());
+}
 
 $page_title = 'Receive Purchases';
 
@@ -46,20 +54,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['receive_po'])) {
                 $_SESSION['error'] = 'No line items found for this purchase order. Add materials on the related purchase request first.';
             } else {
                 $pdo->beginTransaction();
-                $stock = $pdo->prepare("UPDATE materials SET current_stock = current_stock + ? WHERE id = ?");
-                $move = $pdo->prepare("INSERT INTO stock_movements (material_id, movement_type, quantity, reason, created_by) VALUES (?, 'in', ?, ?, ?)");
                 $markItem = $pdo->prepare("UPDATE purchase_order_items SET received_quantity = quantity WHERE purchase_order_id = ? AND material_id = ?");
                 foreach ($items as $item) {
                     $qty = (int)$item['quantity'] - (int)($item['received_quantity'] ?? 0);
                     if ($qty <= 0) {
                         continue;
                     }
-                    $stock->execute([$qty, (int)$item['material_id']]);
-                    $move->execute([(int)$item['material_id'], $qty, 'Received PO ' . $po['po_number'], $_SESSION['user_id']]);
+                    warehouseReceiveBatch($pdo, (int)$item['material_id'], $qty, (int)$_SESSION['user_id'], 'Received PO ' . $po['po_number']);
                     try {
                         $markItem->execute([(int)$po['id'], (int)$item['material_id']]);
                     } catch (PDOException $e) {
-                        // table may not have received_quantity on older schemas
                     }
                 }
                 $pdo->prepare("UPDATE purchase_orders SET status = 'delivered', received_at = NOW() WHERE id = ?")->execute([$po_id]);
@@ -67,15 +71,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['receive_po'])) {
                     $pdo->prepare("UPDATE purchase_requests SET status = 'received' WHERE id = ?")->execute([$po['purchase_request_id']]);
                 }
                 $pdo->commit();
+                try {
+                    syncReceivedOrdersForRelease($pdo);
+                    syncPurchasedMaterialsToAccounting($pdo);
+                } catch (Throwable $syncError) {
+                    error_log('[Runeha ERP] sync received orders for release: ' . $syncError->getMessage());
+                }
                 logActivity($_SESSION['user_id'], 'Received purchase order', 'Warehouse', 'PO: ' . $po['po_number']);
                 $_SESSION['success'] = 'Purchase order ' . $po['po_number'] . ' received and stock updated.';
             }
         }
-    } catch (PDOException $e) {
+    } catch (Throwable $e) {
         if ($pdo->inTransaction()) {
             $pdo->rollBack();
         }
-        $_SESSION['error'] = userDatabaseError($e, 'Warehouse');
+        $_SESSION['error'] = $e instanceof PDOException ? userDatabaseError($e, 'Warehouse') : $e->getMessage();
     }
     header('Location: receive_purchases.php');
     exit();
@@ -101,6 +111,7 @@ include '../../includes/header.php';
 <div class="page-header">
     <h1><i class="fas fa-truck-loading"></i> Receive Purchases</h1>
     <a href="stock.php?action=in" class="btn btn-outline">Manual Stock-In</a>
+    <a href="movements.php" class="btn btn-outline">Movements</a>
 </div>
 
 <?php if (isset($_SESSION['success'])): ?>
@@ -133,7 +144,7 @@ include '../../includes/header.php';
                     <tr><td colspan="6" class="table-empty">No purchase orders to receive.</td></tr>
                 <?php else: ?>
                     <?php foreach ($orders as $order): ?>
-                    <tr>
+                    <tr id="po-<?php echo (int) $order['id']; ?>" <?php echo (int) ($_GET['po'] ?? 0) === (int) $order['id'] ? 'style="outline:2px solid #4e73df;"' : ''; ?>>
                         <td><strong><?php echo htmlspecialchars($order['po_number']); ?></strong></td>
                         <td><?php echo htmlspecialchars($order['pr_number'] ?? '—'); ?></td>
                         <td><?php echo htmlspecialchars(trim(($order['project_code'] ?? '') . ' ' . ($order['project_name'] ?? '')) ?: '—'); ?></td>
@@ -146,7 +157,8 @@ include '../../includes/header.php';
                                 <button type="submit" name="receive_po" class="btn btn-sm btn-primary">Receive</button>
                             </form>
                             <?php else: ?>
-                            <span class="muted-note">Received<?php echo !empty($order['received_at']) ? ' ' . date('M d, Y', strtotime($order['received_at'])) : ''; ?></span>
+                            <a href="movements.php" class="btn btn-sm btn-info">Movements</a>
+                            <a href="stock.php" class="btn btn-sm btn-outline">Stock</a>
                             <?php endif; ?>
                         </td>
                     </tr>
@@ -156,5 +168,10 @@ include '../../includes/header.php';
         </table>
     </div>
 </div>
+<?php if ((int) ($_GET['po'] ?? 0) > 0): ?>
+<script>
+document.getElementById('po-<?php echo (int) $_GET['po']; ?>')?.scrollIntoView({behavior:'smooth', block:'center'});
+</script>
+<?php endif; ?>
 
 <?php include '../../includes/footer.php'; ?>

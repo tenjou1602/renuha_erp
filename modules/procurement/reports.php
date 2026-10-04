@@ -6,7 +6,7 @@ requireDepartment(['procurement']);
 
 $page_title = 'Procurement Reports';
 $report_type = $_GET['report'] ?? 'overview';
-$start_date = $_GET['start_date'] ?? date('Y-m-01');
+$start_date = $_GET['start_date'] ?? date('Y-01-01');
 $end_date = $_GET['end_date'] ?? date('Y-m-t');
 
 // Report data
@@ -17,8 +17,8 @@ try {
             // General overview statistics
             $report_data['total_prs'] = $pdo->query("SELECT COUNT(*) FROM purchase_requests WHERE created_at BETWEEN '$start_date' AND '$end_date 23:59:59'")->fetchColumn() ?? 0;
             $report_data['total_pos'] = $pdo->query("SELECT COUNT(*) FROM purchase_orders WHERE created_at BETWEEN '$start_date' AND '$end_date 23:59:59'")->fetchColumn() ?? 0;
-            $report_data['total_spent'] = $pdo->query("SELECT COALESCE(SUM(pr.total_amount), 0) FROM purchase_requests pr WHERE pr.status IN ('approved', 'confirmed', 'ordered', 'received') AND pr.created_at BETWEEN '$start_date' AND '$end_date 23:59:59'")->fetchColumn() ?? 0;
-            $report_data['avg_po_value'] = $pdo->query("SELECT COALESCE(AVG(pr.total_amount), 0) FROM purchase_requests pr WHERE pr.status IN ('approved', 'confirmed', 'ordered', 'received') AND pr.created_at BETWEEN '$start_date' AND '$end_date 23:59:59'")->fetchColumn() ?? 0;
+            $report_data['total_spent'] = $pdo->query("SELECT COALESCE(SUM(pr.total_amount), 0) FROM purchase_requests pr WHERE pr.status IN ('approved', 'confirmed', 'ordered', 'received', 'completed') AND pr.created_at BETWEEN '$start_date' AND '$end_date 23:59:59'")->fetchColumn() ?? 0;
+            $report_data['avg_po_value'] = $pdo->query("SELECT COALESCE(AVG(pr.total_amount), 0) FROM purchase_requests pr WHERE pr.status IN ('approved', 'confirmed', 'ordered', 'received', 'completed') AND pr.created_at BETWEEN '$start_date' AND '$end_date 23:59:59'")->fetchColumn() ?? 0;
             
             // Monthly trend
             $report_data['monthly_trend'] = $pdo->query("

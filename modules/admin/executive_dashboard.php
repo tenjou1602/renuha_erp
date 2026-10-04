@@ -1,6 +1,7 @@
 <?php
 require_once '../../config/database.php';
 require_once '../../includes/auth.php';
+require_once '../../includes/accounting_ledger.php';
 
 requireAdmin();
 
@@ -13,10 +14,15 @@ $items_needing_attention = [];
 $recent_accomplishments = [];
 $recent_department_activity = [];
 try {
+    try {
+        syncDepartmentWorkflow($pdo);
+    } catch (Throwable $e) {
+        error_log('[Runeha ERP] department sync: ' . $e->getMessage());
+    }
     // Project Statistics
     $stats['active_projects'] = $pdo->query("SELECT COUNT(*) FROM projects WHERE status IN ('planning', 'ongoing')")->fetchColumn() ?? 0;
     $stats['total_project_amount'] = $pdo->query("SELECT COALESCE(SUM(estimated_budget), 0) FROM projects")->fetchColumn() ?? 0;
-    $stats['total_project_expenses'] = $pdo->query("SELECT COALESCE(SUM(actual_cost), 0) FROM projects")->fetchColumn() ?? 0;
+    $stats['total_project_expenses'] = $pdo->query("SELECT COALESCE(SUM(amount), 0) FROM expenses WHERE status IN ('pending', 'paid')")->fetchColumn() ?? 0;
     
     // Financial Statistics - with table existence check
     try {
@@ -38,7 +44,7 @@ try {
         'color' => '#f59e0b',
         'total_prs' => $pdo->query("SELECT COUNT(*) FROM purchase_requests")->fetchColumn() ?? 0,
         'pending_prs' => $pdo->query("SELECT COUNT(*) FROM purchase_requests WHERE status = 'pending'")->fetchColumn() ?? 0,
-        'total_value' => $pdo->query("SELECT COALESCE(SUM(total_amount), 0) FROM purchase_requests WHERE status IN ('approved', 'confirmed', 'ordered', 'received')")->fetchColumn() ?? 0
+        'total_value' => $pdo->query("SELECT COALESCE(SUM(total_amount), 0) FROM purchase_requests WHERE status IN ('approved', 'confirmed', 'ordered', 'received', 'completed')")->fetchColumn() ?? 0
     ];
     
     $department_summaries['accounting'] = [
@@ -46,7 +52,7 @@ try {
         'icon' => 'chart-line',
         'color' => '#36b9cc',
         'total_invoices' => $pdo->query("SELECT COUNT(*) FROM invoices")->fetchColumn() ?? 0,
-        'total_expenses' => $pdo->query("SELECT COALESCE(SUM(amount), 0) FROM expenses WHERE status = 'paid'")->fetchColumn() ?? 0,
+        'total_expenses' => $pdo->query("SELECT COALESCE(SUM(amount), 0) FROM expenses WHERE status IN ('pending', 'paid')")->fetchColumn() ?? 0,
         'funds_count' => 0
     ];
     // Get funds count with error handling
@@ -57,6 +63,26 @@ try {
         }
     } catch (PDOException $e) {
         // funds table may not exist, keep default 0
+    }
+    try {
+        $department_summaries['accounting']['client_quotations'] = $pdo->query("SELECT COUNT(*) FROM client_quotations")->fetchColumn() ?? 0;
+        $department_summaries['accounting']['approved_quotations'] = $pdo->query("SELECT COUNT(*) FROM client_quotations WHERE status = 'approved'")->fetchColumn() ?? 0;
+        $ledger_balances = ledgerAccountBalances();
+        $department_summaries['accounting']['ledger_ar'] = 0;
+        $department_summaries['accounting']['ledger_cash'] = 0;
+        foreach ($ledger_balances as $balance) {
+            if ($balance['code'] === RUNEHA_ACCT_AR) {
+                $department_summaries['accounting']['ledger_ar'] = $balance['balance'];
+            }
+            if ($balance['code'] === RUNEHA_ACCT_CASH) {
+                $department_summaries['accounting']['ledger_cash'] = $balance['balance'];
+            }
+        }
+    } catch (PDOException $e) {
+        $department_summaries['accounting']['client_quotations'] = 0;
+        $department_summaries['accounting']['approved_quotations'] = 0;
+        $department_summaries['accounting']['ledger_ar'] = 0;
+        $department_summaries['accounting']['ledger_cash'] = 0;
     }
     
     $department_summaries['engineering'] = [
@@ -247,9 +273,12 @@ include '../../includes/header.php';
                 <div style="font-size:0.85rem;color:#64748b;">Pending: <strong><?php echo number_format($dept['pending_prs']); ?></strong></div>
                 <div style="font-size:0.85rem;color:#64748b;">Total Value: <strong>₱<?php echo number_format($dept['total_value'], 2); ?></strong></div>
             <?php elseif ($key === 'accounting'): ?>
+                <div style="font-size:0.85rem;color:#64748b;">Client Quotations: <strong><?php echo number_format($dept['client_quotations'] ?? 0); ?></strong></div>
+                <div style="font-size:0.85rem;color:#64748b;">Approved, not invoiced: <strong><?php echo number_format($dept['approved_quotations'] ?? 0); ?></strong></div>
                 <div style="font-size:0.85rem;color:#64748b;">Total Invoices: <strong><?php echo number_format($dept['total_invoices']); ?></strong></div>
+                <div style="font-size:0.85rem;color:#64748b;">Ledger AR: <strong>₱<?php echo number_format($dept['ledger_ar'] ?? 0, 2); ?></strong></div>
+                <div style="font-size:0.85rem;color:#64748b;">Ledger Cash: <strong>₱<?php echo number_format($dept['ledger_cash'] ?? 0, 2); ?></strong></div>
                 <div style="font-size:0.85rem;color:#64748b;">Total Expenses: <strong>₱<?php echo number_format($dept['total_expenses'], 2); ?></strong></div>
-                <div style="font-size:0.85rem;color:#64748b;">Active Funds: <strong><?php echo number_format($dept['funds_count']); ?></strong></div>
             <?php elseif ($key === 'engineering'): ?>
                 <div style="font-size:0.85rem;color:#64748b;">Total Projects: <strong><?php echo number_format($dept['total_projects']); ?></strong></div>
                 <div style="font-size:0.85rem;color:#64748b;">Ongoing: <strong><?php echo number_format($dept['ongoing_projects']); ?></strong></div>

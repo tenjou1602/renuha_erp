@@ -1,8 +1,15 @@
 <?php
 require_once '../../config/database.php';
 require_once '../../includes/auth.php';
+require_once '../../includes/warehouse_release.php';
 
 requireDepartment(['warehouse']);
+
+try {
+    syncDepartmentWorkflow($pdo);
+} catch (Throwable $e) {
+    error_log('[Runeha ERP] sync received orders for release: ' . $e->getMessage());
+}
 
 $page_title = 'Project Materials';
 $project_id = (int)($_GET['project_id'] ?? 0);
@@ -17,7 +24,7 @@ try {
         $stmt = $pdo->prepare("
             SELECT
                 m.id, m.material_code, m.name, m.unit, m.current_stock, m.min_stock, m.cost_per_unit, m.category,
-                s.name as supplier_name,
+                COALESCE(NULLIF(s.name, ''), NULLIF(m.supplier, '')) as supplier_name,
                 COALESCE(SUM(pri.quantity), 0) as allocated_quantity,
                 COUNT(DISTINCT pr.id) as pr_count
             FROM materials m
@@ -25,7 +32,7 @@ try {
             LEFT JOIN purchase_request_items pri ON m.id = pri.material_id
             LEFT JOIN purchase_requests pr ON pri.purchase_request_id = pr.id AND pr.project_id = ?
             WHERE m.status = 'active'
-            GROUP BY m.id, m.material_code, m.name, m.unit, m.current_stock, m.min_stock, m.cost_per_unit, m.category, s.name
+            GROUP BY m.id, m.material_code, m.name, m.unit, m.current_stock, m.min_stock, m.cost_per_unit, m.category, s.name, m.supplier
             HAVING COALESCE(SUM(pri.quantity), 0) > 0
             ORDER BY COALESCE(SUM(pri.quantity), 0) DESC
         ");
@@ -35,15 +42,15 @@ try {
         $project_materials = $pdo->query("
             SELECT
                 m.id, m.material_code, m.name, m.unit, m.current_stock, m.min_stock, m.cost_per_unit, m.category,
-                s.name as supplier_name,
+                COALESCE(NULLIF(s.name, ''), NULLIF(m.supplier, '')) as supplier_name,
                 COUNT(DISTINCT pr.project_id) as project_count,
                 COALESCE(SUM(pri.quantity), 0) as total_allocated
             FROM materials m
             LEFT JOIN suppliers s ON m.supplier_id = s.id
             LEFT JOIN purchase_request_items pri ON m.id = pri.material_id
-            LEFT JOIN purchase_requests pr ON pri.purchase_request_id = pr.id AND pr.status IN ('approved', 'confirmed', 'ordered', 'received')
+            LEFT JOIN purchase_requests pr ON pri.purchase_request_id = pr.id AND pr.status IN ('approved', 'confirmed', 'ordered', 'received', 'completed')
             WHERE m.status = 'active'
-            GROUP BY m.id, m.material_code, m.name, m.unit, m.current_stock, m.min_stock, m.cost_per_unit, m.category, s.name
+            GROUP BY m.id, m.material_code, m.name, m.unit, m.current_stock, m.min_stock, m.cost_per_unit, m.category, s.name, m.supplier
             HAVING COUNT(DISTINCT pr.project_id) > 0
             ORDER BY COALESCE(SUM(pri.quantity), 0) DESC
         ")->fetchAll();
@@ -78,6 +85,69 @@ include '../../includes/header.php';
 
 <?php if (isset($error)): ?>
     <div class="alert alert-danger"><?php echo htmlspecialchars($error); ?></div>
+<?php endif; ?>
+
+<?php
+$release_rows = [];
+try {
+    $releaseSql = "
+        SELECT mr.id, mr.quantity, mr.status, mr.project_id,
+               p.project_code, p.name AS project_name, p.location,
+               m.name AS material_name, m.unit,
+               u.full_name AS engineer_name, pr.pr_number
+        FROM material_requests mr
+        INNER JOIN projects p ON p.id = mr.project_id
+        LEFT JOIN materials m ON m.id = mr.material_id
+        LEFT JOIN users u ON u.id = mr.requested_by
+        LEFT JOIN purchase_requests pr ON pr.id = mr.purchase_request_id
+        WHERE mr.purchase_order_item_id IS NOT NULL
+    ";
+    if ($project_id > 0) {
+        $releaseStmt = $pdo->prepare($releaseSql . " AND mr.project_id = ? ORDER BY mr.id DESC");
+        $releaseStmt->execute([$project_id]);
+        $release_rows = $releaseStmt->fetchAll();
+    } else {
+        $release_rows = $pdo->query($releaseSql . " ORDER BY mr.id DESC")->fetchAll();
+    }
+} catch (PDOException $e) {
+    $release_rows = [];
+}
+?>
+<?php if ($release_rows): ?>
+<div class="card">
+    <h3 class="section-title"><i class="fas fa-dolly"></i> Natanggap na, para i-release sa site</h3>
+    <p style="color:#64748b;margin-top:0;">Ito ang request ng Engineering na na-order ng Procurement at natanggap na ng Warehouse.</p>
+    <div class="table-responsive">
+        <table class="table">
+            <thead>
+                <tr>
+                    <th>Project</th>
+                    <th>Location / site</th>
+                    <th>Engineer</th>
+                    <th>Request</th>
+                    <th>Material</th>
+                    <th>Qty</th>
+                    <th>Status</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                <?php foreach ($release_rows as $release): ?>
+                <tr>
+                    <td><strong><?php echo htmlspecialchars($release['project_code']); ?></strong><div style="color:#64748b;font-size:0.8rem;"><?php echo htmlspecialchars($release['project_name']); ?></div></td>
+                    <td><?php echo htmlspecialchars($release['location'] ?: 'Walang location'); ?></td>
+                    <td><?php echo htmlspecialchars($release['engineer_name'] ?? 'N/A'); ?></td>
+                    <td><?php echo htmlspecialchars($release['pr_number'] ?? ''); ?></td>
+                    <td><?php echo htmlspecialchars($release['material_name'] ?? 'Material'); ?></td>
+                    <td><?php echo number_format((int) $release['quantity']); ?> <?php echo htmlspecialchars($release['unit'] ?? ''); ?></td>
+                    <td><?php echo $release['status'] === 'approved' ? 'Released to site' : ($release['status'] === 'pending' ? 'For release' : ucfirst($release['status'])); ?></td>
+                    <td><a class="btn btn-sm btn-primary" href="material_requests.php?project_id=<?php echo (int) $release['project_id']; ?>">Release</a></td>
+                </tr>
+                <?php endforeach; ?>
+            </tbody>
+        </table>
+    </div>
+</div>
 <?php endif; ?>
 
 <!-- Project Filter -->
@@ -164,7 +234,8 @@ include '../../includes/header.php';
                         <td><?php echo htmlspecialchars($material['supplier_name'] ?? 'N/A'); ?></td>
                         <td><?php echo $project_id > 0 ? $material['pr_count'] : $material['project_count']; ?></td>
                         <td>
-                            <a href="stock.php?action=out&material_id=<?php echo $material['id']; ?>" class="btn btn-sm btn-primary"><i class="fas fa-minus"></i> Release</a>
+                            <a href="stock.php?action=out&material_id=<?php echo $material['id']; ?><?php echo $project_id > 0 ? '&project_id=' . (int) $project_id : ''; ?>" class="btn btn-sm btn-primary"><i class="fas fa-minus"></i> Release</a>
+                            <a href="inventory_history.php?material_id=<?php echo (int) $material['id']; ?>" class="btn btn-sm btn-info">History</a>
                         </td>
                     </tr>
                     <?php endforeach; ?>

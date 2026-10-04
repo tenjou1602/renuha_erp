@@ -6,6 +6,7 @@ requireDepartment(['engineering']);
 
 $page_title = 'Project Details';
 $id = (int)($_GET['id'] ?? 0);
+$view = $_GET['view'] ?? '';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_personnel'])) {
     if (!canWriteDepartmentData('projects')) {
@@ -55,6 +56,7 @@ $purchase_requests = [];
 $invoices = [];
 $expenses = [];
 $quotations = [];
+$client_quotations = [];
 $personnel = [];
 $all_projects = [];
 $project_accomplishments = [];
@@ -62,6 +64,14 @@ $project_attachments = [];
 $assigned_name = 'Unassigned';
 
 try {
+    if ($id <= 0 && $view === 'implementation') {
+        $openStmt = $pdo->query("SELECT id FROM projects WHERE status IN ('assigned', 'planning', 'ongoing') ORDER BY created_at DESC");
+        $openProjects = $openStmt->fetchAll();
+        if (count($openProjects) === 1) {
+            header('Location: project_details.php?view=implementation&id=' . (int) $openProjects[0]['id']);
+            exit();
+        }
+    }
     if ($id <= 0) {
         $all_projects = $pdo->query("SELECT id, project_code, name, location, status, estimated_budget, start_date, end_date FROM projects ORDER BY created_at DESC")->fetchAll();
     } else {
@@ -104,6 +114,14 @@ try {
         $q = $pdo->prepare("SELECT * FROM quotations WHERE project_id = ? ORDER BY created_at DESC");
         $q->execute([$id]);
         $quotations = $q->fetchAll();
+
+        try {
+            $cq = $pdo->prepare("SELECT * FROM client_quotations WHERE project_id = ? ORDER BY created_at DESC");
+            $cq->execute([$id]);
+            $client_quotations = $cq->fetchAll();
+        } catch (PDOException $e) {
+            $client_quotations = [];
+        }
 
         $p = $pdo->prepare("SELECT * FROM personnel WHERE project_id = ? ORDER BY created_at DESC");
         $p->execute([$id]);
@@ -164,12 +182,12 @@ include '../../includes/header.php';
 
 <?php if ($id <= 0 || !$project): ?>
 <div class="page-header">
-    <h1><i class="fas fa-folder-open"></i> Project Details</h1>
-    <a href="projects.php" class="btn btn-secondary"><i class="fas fa-list"></i> All Projects</a>
+    <h1><i class="fas fa-hard-hat"></i> <?php echo $view === 'implementation' ? 'Project Implementation' : 'Project Planning'; ?></h1>
+    <a href="received_projects.php" class="btn btn-secondary"><i class="fas fa-inbox"></i> Received Projects</a>
 </div>
 
 <div class="card">
-    <p class="muted-note">Select a project to view full details, related requests, invoices, and personnel.</p>
+    <p class="muted-note"><?php echo $view === 'implementation' ? 'Piliin ang project na ipinatutupad. Dito ang personnel, materials, at progress ng site.' : 'Piliin ang project para sa planning.'; ?></p>
     <div class="table-responsive">
         <table class="table">
             <thead>
@@ -194,7 +212,7 @@ include '../../includes/header.php';
                         <td><span class="badge badge-<?php echo htmlspecialchars($row['status']); ?>"><?php echo ucfirst(str_replace('_', ' ', $row['status'])); ?></span></td>
                         <td>₱<?php echo number_format((float)$row['estimated_budget'], 2); ?></td>
                         <td>
-                            <a href="project_details.php?id=<?php echo (int)$row['id']; ?>" class="btn btn-sm btn-info"><i class="fas fa-eye"></i> View</a>
+                            <a href="project_details.php?id=<?php echo (int)$row['id']; ?><?php echo $view === 'implementation' ? '&view=implementation' : ''; ?>" class="btn btn-sm btn-info"><i class="fas fa-hard-hat"></i> <?php echo $view === 'implementation' ? 'Open' : 'View'; ?></a>
                         </td>
                     </tr>
                     <?php endforeach; ?>
@@ -207,14 +225,14 @@ include '../../includes/header.php';
 <?php else: ?>
 
 <div class="page-header">
-    <h1><i class="fas fa-chart-bar"></i> Project Details</h1>
+    <h1><i class="fas fa-hard-hat"></i> <?php echo $view === 'implementation' ? 'Project Implementation' : 'Project Details'; ?></h1>
     <div class="button-row">
         <?php if (canWriteDepartmentData('projects')): ?>
         <a href="projects.php?action=edit&id=<?php echo $project['id']; ?>" class="btn btn-warning"><i class="fas fa-edit"></i> Edit</a>
         <?php endif; ?>
         <a href="project_pdf.php?id=<?php echo (int)$project['id']; ?>" class="btn btn-outline"><i class="fas fa-download"></i> Download PDF</a>
         <a href="project_details.php" class="btn btn-secondary"><i class="fas fa-arrow-left"></i> All Details</a>
-        <a href="projects.php" class="btn btn-secondary"><i class="fas fa-list"></i> Projects</a>
+        <a href="received_projects.php?id=<?php echo (int) $project['id']; ?>" class="btn btn-secondary"><i class="fas fa-inbox"></i> Received</a>
     </div>
 </div>
 
@@ -292,8 +310,8 @@ include '../../includes/header.php';
         <div style="font-size:1.5rem;font-weight:700;"><?php echo count($expenses); ?></div>
     </div>
     <div class="card" style="margin:0;border-left:4px solid #6f42c1;">
-        <div style="font-size:0.7rem;color:#64748b;">Quotations</div>
-        <div style="font-size:1.5rem;font-weight:700;"><?php echo count($quotations ?? []); ?></div>
+        <div style="font-size:0.7rem;color:#64748b;">Client Quotations</div>
+        <div style="font-size:1.5rem;font-weight:700;"><?php echo count($client_quotations ?? []); ?></div>
     </div>
     <div class="card" style="margin:0;border-left:4px solid #36b9cc;">
         <div style="font-size:0.7rem;color:#64748b;">Personnel</div>
@@ -411,9 +429,44 @@ include '../../includes/header.php';
     <?php endif; ?>
 </div>
 
-<!-- Quotations -->
 <div class="card">
-    <h3><i class="fas fa-file-signature"></i> Quotations</h3>
+    <h3><i class="fas fa-file-signature"></i> Client Quotations</h3>
+    <?php if (empty($client_quotations)): ?>
+        <div class="empty-state">
+            <i class="fas fa-file-signature"></i>
+            <p>No client quotations for this project.</p>
+        </div>
+    <?php else: ?>
+        <div class="table-responsive">
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th>Quotation #</th>
+                        <th>Client</th>
+                        <th>Grand Total</th>
+                        <th>Status</th>
+                        <th>Date</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <?php foreach ($client_quotations as $qt): ?>
+                    <tr>
+                        <td><strong><?php echo htmlspecialchars($qt['quotation_number']); ?></strong></td>
+                        <td><?php echo htmlspecialchars($qt['client_name']); ?></td>
+                        <td>₱<?php echo number_format($qt['grand_total'] ?? 0, 2); ?></td>
+                        <td><span class="badge badge-<?php echo $qt['status']; ?>"><?php echo ucfirst($qt['status']); ?></span></td>
+                        <td><?php echo date('M d, Y', strtotime($qt['created_at'])); ?></td>
+                    </tr>
+                    <?php endforeach; ?>
+                </tbody>
+            </table>
+        </div>
+    <?php endif; ?>
+</div>
+
+<!-- Supplier Quotes -->
+<div class="card">
+    <h3><i class="fas fa-truck"></i> Supplier Quotes</h3>
     <?php if (empty($quotations ?? [])): ?>
         <div class="empty-state">
             <i class="fas fa-file-signature"></i>

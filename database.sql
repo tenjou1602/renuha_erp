@@ -42,19 +42,45 @@ CREATE TABLE IF NOT EXISTS `projects` (
   `client` VARCHAR(200) NULL,
   `start_date` DATE NULL,
   `end_date` DATE NULL,
-  `status` ENUM('planning','ongoing','completed','on_hold') NOT NULL DEFAULT 'planning',
+  `status` ENUM('draft','quotation','approved','accounting_setup','assigned','planning','material_request','procurement','material_available','implementation','ongoing','completed','on_hold') NOT NULL DEFAULT 'approved',
   `estimated_budget` DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+  `material_cost` DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+  `labor_cost` DECIMAL(15,2) NOT NULL DEFAULT 0.00,
   `actual_cost` DECIMAL(15,2) NOT NULL DEFAULT 0.00,
   `created_by` BIGINT UNSIGNED NULL,
+  `assigned_to` BIGINT UNSIGNED NULL,
   `in_charge_id` BIGINT UNSIGNED NULL,
+  `source_quotation_id` BIGINT UNSIGNED NULL,
+  `source_contract_id` BIGINT UNSIGNED NULL,
+  `quotation_path` VARCHAR(255) NULL,
+  `quotation_name` VARCHAR(255) NULL,
+  `subject` TEXT NULL,
+  `accounting_received_at` DATETIME NULL,
+  `engineering_received_at` DATETIME NULL,
   `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` TIMESTAMP NULL DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   UNIQUE KEY `uq_projects_code` (`project_code`),
   KEY `idx_projects_creator` (`created_by`),
+  KEY `idx_projects_assigned_to` (`assigned_to`),
   KEY `idx_projects_pic` (`in_charge_id`),
+  KEY `idx_projects_source_quote` (`source_quotation_id`),
+  KEY `idx_projects_source_contract` (`source_contract_id`),
   CONSTRAINT `fk_projects_creator` FOREIGN KEY (`created_by`) REFERENCES `users` (`id`) ON DELETE SET NULL ON UPDATE CASCADE,
   CONSTRAINT `fk_projects_pic` FOREIGN KEY (`in_charge_id`) REFERENCES `users` (`id`) ON DELETE SET NULL ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `project_quotation_items` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `project_id` BIGINT UNSIGNED NOT NULL,
+  `item_name` VARCHAR(255) NOT NULL,
+  `description` TEXT NULL,
+  `quantity` DECIMAL(12,2) NOT NULL DEFAULT 1.00,
+  `unit` VARCHAR(50) NULL,
+  `unit_price` DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+  `line_type` ENUM('material','labor','other') NOT NULL DEFAULT 'other',
+  PRIMARY KEY (`id`),
+  KEY `idx_pqi_project` (`project_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS `suppliers` (
@@ -106,7 +132,7 @@ CREATE TABLE IF NOT EXISTS `purchase_requests` (
   `requestor_id` BIGINT UNSIGNED NOT NULL,
   `purpose` TEXT NOT NULL,
   `priority` ENUM('low','medium','high','urgent') NOT NULL DEFAULT 'medium',
-  `status` ENUM('draft','pending','approved','confirmed','rejected','ordered','received') NOT NULL DEFAULT 'pending',
+  `status` ENUM('draft','pending','approved','confirmed','rejected','ordered','received','completed') NOT NULL DEFAULT 'pending',
   `total_amount` DECIMAL(15,2) NOT NULL DEFAULT 0.00,
   `approved_by` BIGINT UNSIGNED NULL,
   `approved_at` DATETIME NULL,
@@ -153,6 +179,7 @@ CREATE TABLE IF NOT EXISTS `purchase_orders` (
   `delivery_date` DATE NULL,
   `payment_terms` VARCHAR(100) NULL,
   `status` ENUM('draft','sent','confirmed','ready_for_warehouse','delivered','cancelled') NOT NULL DEFAULT 'draft',
+  `received_at` DATETIME NULL,
   `created_by` BIGINT UNSIGNED NULL,
   `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` TIMESTAMP NULL DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
@@ -168,6 +195,7 @@ CREATE TABLE IF NOT EXISTS `quotations` (
   `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   `quotation_number` VARCHAR(50) NOT NULL,
   `project_id` BIGINT UNSIGNED NULL,
+  `purchase_request_id` BIGINT UNSIGNED NULL,
   `supplier` VARCHAR(200) NOT NULL,
   `supplier_contact` VARCHAR(150) NULL,
   `valid_until` DATE NULL,
@@ -180,19 +208,41 @@ CREATE TABLE IF NOT EXISTS `quotations` (
   PRIMARY KEY (`id`),
   UNIQUE KEY `uq_quotation_number` (`quotation_number`),
   KEY `idx_quotations_project` (`project_id`),
+  KEY `idx_quotations_pr` (`purchase_request_id`),
   KEY `idx_quotations_creator` (`created_by`),
   CONSTRAINT `fk_quotations_project` FOREIGN KEY (`project_id`) REFERENCES `projects` (`id`) ON DELETE SET NULL ON UPDATE CASCADE,
   CONSTRAINT `fk_quotations_creator` FOREIGN KEY (`created_by`) REFERENCES `users` (`id`) ON DELETE SET NULL ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `quotation_items` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `quotation_id` BIGINT UNSIGNED NOT NULL,
+  `purchase_request_item_id` BIGINT UNSIGNED NOT NULL,
+  `material_id` BIGINT UNSIGNED NOT NULL,
+  `quantity` INT UNSIGNED NOT NULL DEFAULT 1,
+  `unit` VARCHAR(30) NOT NULL DEFAULT 'pcs',
+  `unit_price` DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+  PRIMARY KEY (`id`),
+  KEY `idx_qi_quotation` (`quotation_id`),
+  KEY `idx_qi_pr_item` (`purchase_request_item_id`),
+  KEY `idx_qi_material` (`material_id`),
+  CONSTRAINT `fk_qi_quotation` FOREIGN KEY (`quotation_id`) REFERENCES `quotations` (`id`) ON DELETE CASCADE ON UPDATE CASCADE,
+  CONSTRAINT `fk_qi_pr_item` FOREIGN KEY (`purchase_request_item_id`) REFERENCES `purchase_request_items` (`id`) ON DELETE CASCADE ON UPDATE CASCADE,
+  CONSTRAINT `fk_qi_material` FOREIGN KEY (`material_id`) REFERENCES `materials` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS `invoices` (
   `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   `invoice_number` VARCHAR(50) NOT NULL,
   `project_id` BIGINT UNSIGNED NULL,
+  `quotation_id` BIGINT UNSIGNED NULL,
   `client` VARCHAR(200) NOT NULL,
+  `client_id` BIGINT UNSIGNED NULL,
+  `client_name` VARCHAR(200) NULL,
   `invoice_date` DATE NULL,
   `due_date` DATE NULL,
   `amount` DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+  `subtotal` DECIMAL(15,2) NULL,
   `paid_amount` DECIMAL(15,2) NOT NULL DEFAULT 0.00,
   `status` ENUM('draft','sent','partial','paid','overdue','cancelled') NOT NULL DEFAULT 'sent',
   `notes` TEXT NULL,
@@ -201,7 +251,9 @@ CREATE TABLE IF NOT EXISTS `invoices` (
   `updated_at` TIMESTAMP NULL DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   UNIQUE KEY `uq_invoice_number` (`invoice_number`),
+  UNIQUE KEY `uq_invoices_quotation` (`quotation_id`),
   KEY `idx_invoices_project` (`project_id`),
+  KEY `idx_invoices_client` (`client_id`),
   KEY `idx_invoices_creator` (`created_by`),
   CONSTRAINT `fk_invoices_project` FOREIGN KEY (`project_id`) REFERENCES `projects` (`id`) ON DELETE SET NULL ON UPDATE CASCADE,
   CONSTRAINT `fk_invoices_creator` FOREIGN KEY (`created_by`) REFERENCES `users` (`id`) ON DELETE SET NULL ON UPDATE CASCADE
@@ -236,11 +288,13 @@ CREATE TABLE IF NOT EXISTS `expenses` (
   `payment_method` VARCHAR(50) NULL,
   `reference_number` VARCHAR(100) NULL,
   `status` ENUM('pending','paid','cancelled') NOT NULL DEFAULT 'pending',
+  `purchase_order_id` BIGINT UNSIGNED NULL,
   `created_by` BIGINT UNSIGNED NULL,
   `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` TIMESTAMP NULL DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   UNIQUE KEY `uq_expense_number` (`expense_number`),
+  UNIQUE KEY `uq_expenses_po` (`purchase_order_id`),
   KEY `idx_expenses_project` (`project_id`),
   KEY `idx_expenses_creator` (`created_by`),
   CONSTRAINT `fk_expenses_project` FOREIGN KEY (`project_id`) REFERENCES `projects` (`id`) ON DELETE SET NULL ON UPDATE CASCADE,
@@ -315,6 +369,8 @@ CREATE TABLE IF NOT EXISTS `warehouse_stock` (
 CREATE TABLE IF NOT EXISTS `stock_movements` (
   `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   `material_id` BIGINT UNSIGNED NOT NULL,
+  `project_id` BIGINT UNSIGNED NULL,
+  `batch_number` VARCHAR(100) NULL,
   `movement_type` ENUM('in','out','adjustment') NOT NULL,
   `quantity` INT UNSIGNED NOT NULL,
   `reason` VARCHAR(500) NULL,
@@ -322,6 +378,7 @@ CREATE TABLE IF NOT EXISTS `stock_movements` (
   `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   KEY `idx_movements_material` (`material_id`),
+  KEY `idx_movements_project` (`project_id`),
   KEY `idx_movements_creator` (`created_by`),
   CONSTRAINT `fk_movements_material` FOREIGN KEY (`material_id`) REFERENCES `materials` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE,
   CONSTRAINT `fk_movements_creator` FOREIGN KEY (`created_by`) REFERENCES `users` (`id`) ON DELETE SET NULL ON UPDATE CASCADE
@@ -369,15 +426,243 @@ CREATE TABLE IF NOT EXISTS `material_requests` (
   `released_quantity` INT UNSIGNED NOT NULL DEFAULT 0,
   `released_by` BIGINT UNSIGNED NULL,
   `released_at` DATETIME NULL,
+  `purchase_request_id` BIGINT UNSIGNED NULL,
   `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` TIMESTAMP NULL DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   KEY `idx_mr_project` (`project_id`),
   KEY `idx_mr_material` (`material_id`),
+  KEY `idx_mr_purchase_request` (`purchase_request_id`),
   CONSTRAINT `fk_mr_project` FOREIGN KEY (`project_id`) REFERENCES `projects` (`id`) ON DELETE CASCADE ON UPDATE CASCADE,
   CONSTRAINT `fk_mr_material` FOREIGN KEY (`material_id`) REFERENCES `materials` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE,
   CONSTRAINT `fk_mr_requested_by` FOREIGN KEY (`requested_by`) REFERENCES `users` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE,
   CONSTRAINT `fk_mr_released_by` FOREIGN KEY (`released_by`) REFERENCES `users` (`id`) ON DELETE SET NULL ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `chart_of_accounts` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `code` VARCHAR(20) NOT NULL,
+  `name` VARCHAR(150) NOT NULL,
+  `account_type` ENUM('asset','income') NOT NULL,
+  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_coa_code` (`code`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `journal_entries` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `entry_date` DATE NOT NULL,
+  `reference_type` ENUM('invoice','payment') NOT NULL,
+  `reference_id` BIGINT UNSIGNED NOT NULL,
+  `description` VARCHAR(255) NULL,
+  `created_by` BIGINT UNSIGNED NULL,
+  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_journal_ref` (`reference_type`, `reference_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `journal_lines` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `journal_entry_id` BIGINT UNSIGNED NOT NULL,
+  `account_id` BIGINT UNSIGNED NOT NULL,
+  `project_id` BIGINT UNSIGNED NULL,
+  `debit` DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+  `credit` DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+  PRIMARY KEY (`id`),
+  KEY `idx_jl_entry` (`journal_entry_id`),
+  KEY `idx_jl_account` (`account_id`),
+  KEY `idx_jl_project` (`project_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `clients` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `name` VARCHAR(200) NOT NULL,
+  `contact_person` VARCHAR(150) NULL,
+  `phone` VARCHAR(50) NULL,
+  `email` VARCHAR(200) NULL,
+  `address` TEXT NULL,
+  `tin_number` VARCHAR(50) NULL,
+  `status` ENUM('active','inactive') NOT NULL DEFAULT 'active',
+  `created_by` BIGINT UNSIGNED NULL,
+  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` TIMESTAMP NULL DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_clients_status` (`status`),
+  KEY `idx_clients_creator` (`created_by`),
+  CONSTRAINT `fk_clients_creator` FOREIGN KEY (`created_by`) REFERENCES `users` (`id`) ON DELETE SET NULL ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `client_quotations` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `quotation_number` VARCHAR(50) NOT NULL,
+  `client_id` BIGINT UNSIGNED NULL,
+  `client_name` VARCHAR(200) NOT NULL,
+  `project_id` BIGINT UNSIGNED NULL,
+  `scope_of_work` TEXT NULL,
+  `validity_date` DATE NULL,
+  `status` ENUM('draft','sent','approved','rejected','converted') NOT NULL DEFAULT 'draft',
+  `subtotal` DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+  `grand_total` DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+  `notes` TEXT NULL,
+  `attachment_path` VARCHAR(255) NULL,
+  `attachment_name` VARCHAR(255) NULL,
+  `created_by` BIGINT UNSIGNED NULL,
+  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` TIMESTAMP NULL DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_client_quotation_number` (`quotation_number`),
+  KEY `idx_cq_project` (`project_id`),
+  KEY `idx_cq_status` (`status`),
+  KEY `idx_cq_client` (`client_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `client_quotation_items` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `quotation_id` BIGINT UNSIGNED NOT NULL,
+  `line_type` ENUM('material','labor','other') NOT NULL DEFAULT 'other',
+  `item_name` VARCHAR(255) NULL,
+  `material_id` BIGINT UNSIGNED NULL,
+  `description` TEXT NOT NULL,
+  `quantity` DECIMAL(12,2) NOT NULL DEFAULT 1.00,
+  `unit` VARCHAR(50) NULL,
+  `unit_price` DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+  `line_total` DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+  PRIMARY KEY (`id`),
+  KEY `idx_cqi_quotation` (`quotation_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `invoice_items` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `invoice_id` BIGINT UNSIGNED NOT NULL,
+  `line_type` ENUM('material','labor','other') NOT NULL DEFAULT 'other',
+  `material_id` BIGINT UNSIGNED NULL,
+  `description` VARCHAR(255) NOT NULL,
+  `quantity` DECIMAL(12,2) NOT NULL DEFAULT 1.00,
+  `unit` VARCHAR(50) NULL,
+  `unit_price` DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+  `line_total` DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+  PRIMARY KEY (`id`),
+  KEY `idx_ii_invoice` (`invoice_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `purchase_order_items` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `purchase_order_id` BIGINT UNSIGNED NOT NULL,
+  `material_id` BIGINT UNSIGNED NOT NULL,
+  `quantity` INT UNSIGNED NOT NULL DEFAULT 1,
+  `unit_price` DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+  `received_quantity` INT UNSIGNED NOT NULL DEFAULT 0,
+  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_poi_po` (`purchase_order_id`),
+  KEY `idx_poi_material` (`material_id`),
+  CONSTRAINT `fk_poi_po` FOREIGN KEY (`purchase_order_id`) REFERENCES `purchase_orders` (`id`) ON DELETE CASCADE ON UPDATE CASCADE,
+  CONSTRAINT `fk_poi_material` FOREIGN KEY (`material_id`) REFERENCES `materials` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `project_financials` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `project_id` BIGINT UNSIGNED NOT NULL,
+  `contract_amount` DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+  `additional_budget` DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+  `notes` TEXT NULL,
+  `recorded_by` BIGINT UNSIGNED NULL,
+  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` TIMESTAMP NULL DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_project_financials_project` (`project_id`),
+  KEY `idx_pf_recorded_by` (`recorded_by`),
+  CONSTRAINT `fk_pf_project` FOREIGN KEY (`project_id`) REFERENCES `projects` (`id`) ON DELETE CASCADE ON UPDATE CASCADE,
+  CONSTRAINT `fk_pf_recorded_by` FOREIGN KEY (`recorded_by`) REFERENCES `users` (`id`) ON DELETE SET NULL ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `contracts` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `contract_number` VARCHAR(50) NOT NULL,
+  `contract_name` VARCHAR(200) NOT NULL,
+  `project_id` BIGINT UNSIGNED NULL,
+  `client` VARCHAR(200) NOT NULL,
+  `contract_value` DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+  `start_date` DATE NULL,
+  `end_date` DATE NULL,
+  `description` TEXT NULL,
+  `status` ENUM('draft','active','completed','cancelled','expired') NOT NULL DEFAULT 'draft',
+  `created_by` BIGINT UNSIGNED NULL,
+  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` TIMESTAMP NULL DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_contract_number` (`contract_number`),
+  KEY `idx_contracts_project` (`project_id`),
+  KEY `idx_contracts_creator` (`created_by`),
+  CONSTRAINT `fk_contracts_project` FOREIGN KEY (`project_id`) REFERENCES `projects` (`id`) ON DELETE SET NULL ON UPDATE CASCADE,
+  CONSTRAINT `fk_contracts_creator` FOREIGN KEY (`created_by`) REFERENCES `users` (`id`) ON DELETE SET NULL ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `funds` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `fund_name` VARCHAR(200) NOT NULL,
+  `fund_type` ENUM('general','project','reserve','emergency') NOT NULL DEFAULT 'general',
+  `amount` DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+  `allocated_amount` DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+  `project_id` BIGINT UNSIGNED NULL,
+  `description` TEXT NULL,
+  `status` ENUM('active','inactive','frozen') NOT NULL DEFAULT 'active',
+  `created_by` BIGINT UNSIGNED NULL,
+  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` TIMESTAMP NULL DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_funds_project` (`project_id`),
+  KEY `idx_funds_creator` (`created_by`),
+  CONSTRAINT `fk_funds_project` FOREIGN KEY (`project_id`) REFERENCES `projects` (`id`) ON DELETE SET NULL ON UPDATE CASCADE,
+  CONSTRAINT `fk_funds_creator` FOREIGN KEY (`created_by`) REFERENCES `users` (`id`) ON DELETE SET NULL ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `labor_budgets` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `budget_name` VARCHAR(200) NOT NULL,
+  `project_id` BIGINT UNSIGNED NULL,
+  `user_id` BIGINT UNSIGNED NULL,
+  `position` VARCHAR(150) NULL,
+  `allocated_amount` DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+  `used_amount` DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+  `period_start` DATE NULL,
+  `period_end` DATE NULL,
+  `description` TEXT NULL,
+  `status` ENUM('active','inactive','completed') NOT NULL DEFAULT 'active',
+  `created_by` BIGINT UNSIGNED NULL,
+  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` TIMESTAMP NULL DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_labor_budgets_project` (`project_id`),
+  KEY `idx_labor_budgets_user` (`user_id`),
+  KEY `idx_labor_budgets_creator` (`created_by`),
+  CONSTRAINT `fk_labor_budgets_project` FOREIGN KEY (`project_id`) REFERENCES `projects` (`id`) ON DELETE SET NULL ON UPDATE CASCADE,
+  CONSTRAINT `fk_labor_budgets_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE SET NULL ON UPDATE CASCADE,
+  CONSTRAINT `fk_labor_budgets_creator` FOREIGN KEY (`created_by`) REFERENCES `users` (`id`) ON DELETE SET NULL ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `labor_budget_lines` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `labor_budget_id` BIGINT UNSIGNED NOT NULL,
+  `role_key` VARCHAR(40) NOT NULL,
+  `role_name` VARCHAR(150) NOT NULL,
+  `headcount` INT UNSIGNED NOT NULL DEFAULT 0,
+  `wage` DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+  `assigned_count` INT UNSIGNED NOT NULL DEFAULT 0,
+  `line_total` DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+  PRIMARY KEY (`id`),
+  KEY `idx_lbl_budget` (`labor_budget_id`),
+  CONSTRAINT `fk_lbl_budget` FOREIGN KEY (`labor_budget_id`) REFERENCES `labor_budgets` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+INSERT INTO `chart_of_accounts` (`code`, `name`, `account_type`)
+SELECT '1000', 'Cash', 'asset' FROM DUAL
+WHERE NOT EXISTS (SELECT 1 FROM `chart_of_accounts` WHERE `code` = '1000');
+INSERT INTO `chart_of_accounts` (`code`, `name`, `account_type`)
+SELECT '1200', 'Accounts Receivable', 'asset' FROM DUAL
+WHERE NOT EXISTS (SELECT 1 FROM `chart_of_accounts` WHERE `code` = '1200');
+INSERT INTO `chart_of_accounts` (`code`, `name`, `account_type`)
+SELECT '4000', 'Sales/Service Revenue', 'income' FROM DUAL
+WHERE NOT EXISTS (SELECT 1 FROM `chart_of_accounts` WHERE `code` = '4000');
 
 SET FOREIGN_KEY_CHECKS = 1;

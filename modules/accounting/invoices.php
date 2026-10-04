@@ -2,6 +2,7 @@
 require_once '../../config/database.php';
 require_once '../../includes/auth.php';
 require_once '../../includes/mailer.php';
+require_once '../../includes/accounting_ledger.php';
 
 requireDepartment(['accounting']);
 
@@ -25,21 +26,47 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (isset($_POST['add_invoice']) || isset($_POST['update_invoice'])) {
         $invoice_number = $_POST['invoice_number'] ?? generateInvoiceNumber();
         $project_id = (int)($_POST['project_id'] ?? 0);
-        $client = trim($_POST['client'] ?? '');
+        $locked = isset($_POST['update_invoice']) && ledgerEntryExists('invoice', $id);
+        $client_id = null;
+        $client = '';
+        $errors = [];
+        if (!$locked) {
+            try {
+                $clientRow = resolveAccountingClient($_POST['client_id'] ?? '');
+                $client_id = (int) $clientRow['id'];
+                $client = $clientRow['name'];
+            } catch (RuntimeException $e) {
+                $errors[] = $e->getMessage();
+            }
+        }
         $invoice_date = $_POST['invoice_date'] ?? date('Y-m-d');
         $due_date = $_POST['due_date'] ?? '';
         $amount = (float)($_POST['amount'] ?? 0);
         $notes = trim($_POST['notes'] ?? '');
         
-        $errors = [];
-        if (empty($client)) $errors[] = 'Client name is required.';
-        if ($amount <= 0) $errors[] = 'Amount must be greater than 0.';
+        if (!$locked && $client === '') $errors[] = 'Client is required.';
+        if (!$locked && $amount <= 0) $errors[] = 'Amount must be greater than 0.';
+        if (!empty($errors)) {
+            $error = implode(' ', $errors);
+        }
         
         if (empty($errors)) {
+            $project_id = $project_id > 0 ? $project_id : null;
+            $due_date = $due_date !== '' ? $due_date : null;
             try {
                 if (isset($_POST['add_invoice'])) {
-                    $stmt = $pdo->prepare("INSERT INTO invoices (invoice_number, project_id, client, invoice_date, due_date, amount, notes, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
-                    $stmt->execute([$invoice_number, $project_id, $client, $invoice_date, $due_date, $amount, $notes, $_SESSION['user_id']]);
+                    $pdo->beginTransaction();
+                    $stmt = $pdo->prepare("INSERT INTO invoices (invoice_number, project_id, client_id, client, client_name, invoice_date, due_date, amount, subtotal, notes, status, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'sent', ?)");
+                    $stmt->execute([$invoice_number, $project_id, $client_id, $client, $client, $invoice_date, $due_date, $amount, $amount, $notes, $_SESSION['user_id']]);
+                    $newId = (int) $pdo->lastInsertId();
+                    postInvoiceEntry([
+                        'id' => $newId,
+                        'invoice_number' => $invoice_number,
+                        'invoice_date' => $invoice_date,
+                        'amount' => $amount,
+                        'project_id' => $project_id,
+                    ], $_SESSION['user_id']);
+                    $pdo->commit();
                     try {
                         notifyInvoiceGenerated($invoice_number, $client, $amount);
                     } catch (Throwable $e) {
@@ -47,78 +74,107 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     }
                     
                     logActivity($_SESSION['user_id'], 'Created invoice', 'Accounting', "INV: $invoice_number");
-                    $_SESSION['success'] = "Invoice created successfully!";
+                    $_SESSION['success'] = "Invoice created. Accounts Receivable and Sales/Service Revenue were recorded.";
                 } else {
-                    $stmt = $pdo->prepare("UPDATE invoices SET project_id = ?, client = ?, invoice_date = ?, due_date = ?, amount = ?, notes = ? WHERE id = ?");
-                    $stmt->execute([$project_id, $client, $invoice_date, $due_date, $amount, $notes, $id]);
+                    if ($locked) {
+                        $stmt = $pdo->prepare("UPDATE invoices SET invoice_date = ?, due_date = ?, notes = ? WHERE id = ?");
+                        $stmt->execute([$invoice_date, $due_date, $notes, $id]);
+                        $_SESSION['success'] = "Dates and notes updated. The amount stays in the ledger.";
+                    } else {
+                        $stmt = $pdo->prepare("UPDATE invoices SET project_id = ?, client_id = ?, client = ?, client_name = ?, invoice_date = ?, due_date = ?, amount = ?, subtotal = ?, notes = ? WHERE id = ?");
+                        $stmt->execute([$project_id, $client_id, $client, $client, $invoice_date, $due_date, $amount, $amount, $notes, $id]);
+                        $_SESSION['success'] = "Invoice updated successfully!";
+                    }
                     
                     logActivity($_SESSION['user_id'], 'Updated invoice', 'Accounting', "INV: $invoice_number");
-                    $_SESSION['success'] = "Invoice updated successfully!";
                 }
                 header('Location: invoices.php');
                 exit();
-            } catch (PDOException $e) {
-                $error = userDatabaseError($e);
+            } catch (Throwable $e) {
+                if ($pdo->inTransaction()) {
+                    $pdo->rollBack();
+                }
+                $error = $e instanceof RuntimeException ? $e->getMessage() : userDatabaseError($e);
             }
         }
     }
     
     if (isset($_POST['record_payment'])) {
+        if (!canWriteDepartmentData('accounting')) {
+            $_SESSION['error'] = 'Administrators have view-only access.';
+            header('Location: invoices.php');
+            exit();
+        }
         $invoice_id = (int)($_POST['invoice_id'] ?? 0);
         $payment_number = generateNumber('PAY', 'payments', 'payment_number');
-        $amount = (float)($_POST['payment_amount'] ?? 0);
+        $amount = round((float)($_POST['payment_amount'] ?? 0), 2);
         $payment_date = $_POST['payment_date'] ?? date('Y-m-d');
-        $payment_method = $_POST['payment_method'] ?? '';
         $reference_number = trim($_POST['reference_number'] ?? '');
         
-        $errors = [];
-        if ($amount <= 0) $errors[] = 'Payment amount must be greater than 0.';
-        
-        if (empty($errors)) {
+        if ($amount <= 0) {
+            $error = 'Payment amount must be greater than 0.';
+        } else {
             try {
                 $pdo->beginTransaction();
                 
-                // Get current invoice
-                $stmt = $pdo->prepare("SELECT amount, paid_amount, status FROM invoices WHERE id = ?");
+                $stmt = $pdo->prepare("SELECT * FROM invoices WHERE id = ? FOR UPDATE");
                 $stmt->execute([$invoice_id]);
                 $invoice = $stmt->fetch();
+                if (!$invoice || in_array($invoice['status'], ['paid', 'cancelled'], true)) {
+                    throw new RuntimeException('This invoice cannot accept a payment.');
+                }
+                $remaining = round((float) $invoice['amount'] - (float) ($invoice['paid_amount'] ?? 0), 2);
+                if ($amount > $remaining) {
+                    throw new RuntimeException('Amount paid cannot be greater than the remaining balance of ₱' . number_format($remaining, 2) . '.');
+                }
                 
-                $new_paid = ($invoice['paid_amount'] ?? 0) + $amount;
-                $new_status = $new_paid >= $invoice['amount'] ? 'paid' : 'partial';
+                $new_paid = round((float) ($invoice['paid_amount'] ?? 0) + $amount, 2);
+                $new_status = $new_paid >= (float) $invoice['amount'] ? 'paid' : 'partial';
                 
-                // Insert payment
-                $stmt = $pdo->prepare("INSERT INTO payments (payment_number, invoice_id, amount, payment_date, payment_method, reference_number, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)");
-                $stmt->execute([$payment_number, $invoice_id, $amount, $payment_date, $payment_method, $reference_number, $_SESSION['user_id']]);
+                $stmt = $pdo->prepare("INSERT INTO payments (payment_number, invoice_id, amount, payment_date, payment_method, reference_number, created_by) VALUES (?, ?, ?, ?, 'Cash', ?, ?)");
+                $stmt->execute([$payment_number, $invoice_id, $amount, $payment_date, $reference_number, $_SESSION['user_id']]);
+                $paymentId = (int) $pdo->lastInsertId();
                 
-                // Update invoice
                 $stmt = $pdo->prepare("UPDATE invoices SET paid_amount = ?, status = ? WHERE id = ?");
                 $stmt->execute([$new_paid, $new_status, $invoice_id]);
+                postPaymentEntry([
+                    'id' => $paymentId,
+                    'payment_number' => $payment_number,
+                    'payment_date' => $payment_date,
+                    'amount' => $amount,
+                ], $invoice, $_SESSION['user_id']);
                 
                 $pdo->commit();
                 
                 logActivity($_SESSION['user_id'], 'Recorded payment', 'Accounting', "Payment: $payment_number");
-                $_SESSION['success'] = "Payment recorded successfully!";
-                header('Location: invoices.php');
+                $_SESSION['success'] = "Cash payment recorded. Remaining balance is ₱" . number_format(max(0, $remaining - $amount), 2) . ".";
+                header('Location: invoices.php?action=view&id=' . $invoice_id);
                 exit();
-            } catch (PDOException $e) {
-                $pdo->rollBack();
-                $error = userDatabaseError($e);
+            } catch (Throwable $e) {
+                if ($pdo->inTransaction()) {
+                    $pdo->rollBack();
+                }
+                $error = $e instanceof RuntimeException ? $e->getMessage() : userDatabaseError($e);
+                $action = 'view';
+                $id = $invoice_id;
             }
         }
     }
 }
 
 // Get projects for dropdown
-$projects = $pdo->query("SELECT id, name, project_code FROM projects ORDER BY name")->fetchAll();
+$projects = $pdo->query("SELECT id, name, project_code, client FROM projects ORDER BY name")->fetchAll();
+$clients = activeClients();
 
 // Get invoices
 $invoices = [];
 try {
     $query = "
-        SELECT i.*, p.name as project_name, u.full_name as created_by_name
+        SELECT i.*, p.name as project_name, u.full_name as created_by_name, cq.quotation_number
         FROM invoices i
         LEFT JOIN projects p ON i.project_id = p.id
         LEFT JOIN users u ON i.created_by = u.id
+        LEFT JOIN client_quotations cq ON cq.id = i.quotation_id
         ORDER BY i.created_at DESC
     ";
     $invoices = $pdo->query($query)->fetchAll();
@@ -129,12 +185,16 @@ try {
 // Get single invoice for edit/view
 $invoice_details = null;
 $invoice_payments = [];
+$invoice_items = [];
+$invoice_journal = [];
+$invoice_locked = false;
 if ($action === 'edit' || $action === 'view') {
     $stmt = $pdo->prepare("
-        SELECT i.*, p.name as project_name, u.full_name as created_by_name
+        SELECT i.*, p.name as project_name, u.full_name as created_by_name, cq.quotation_number
         FROM invoices i
         LEFT JOIN projects p ON i.project_id = p.id
         LEFT JOIN users u ON i.created_by = u.id
+        LEFT JOIN client_quotations cq ON cq.id = i.quotation_id
         WHERE i.id = ?
     ");
     $stmt->execute([$id]);
@@ -144,6 +204,21 @@ if ($action === 'edit' || $action === 'view') {
         $payments_stmt = $pdo->prepare("SELECT * FROM payments WHERE invoice_id = ? ORDER BY created_at DESC");
         $payments_stmt->execute([$id]);
         $invoice_payments = $payments_stmt->fetchAll();
+        $item_stmt = $pdo->prepare("SELECT * FROM invoice_items WHERE invoice_id = ? ORDER BY id");
+        $item_stmt->execute([$id]);
+        $invoice_items = $item_stmt->fetchAll();
+        $journal_stmt = $pdo->prepare("
+            SELECT je.entry_date, je.description, a.name AS account_name, jl.debit, jl.credit
+            FROM journal_entries je
+            JOIN journal_lines jl ON jl.journal_entry_id = je.id
+            JOIN chart_of_accounts a ON a.id = jl.account_id
+            WHERE (je.reference_type = 'invoice' AND je.reference_id = ?)
+               OR (je.reference_type = 'payment' AND je.reference_id IN (SELECT id FROM payments WHERE invoice_id = ?))
+            ORDER BY je.entry_date, je.id, jl.id
+        ");
+        $journal_stmt->execute([$id, $id]);
+        $invoice_journal = $journal_stmt->fetchAll();
+        $invoice_locked = ledgerEntryExists('invoice', $id);
     }
 }
 
@@ -193,10 +268,10 @@ include '../../includes/header.php';
             </div>
             <div class="form-group">
                 <label>Project</label>
-                <select name="project_id">
+                <select name="project_id" id="invoiceProject">
                     <option value="">No Project</option>
                     <?php foreach ($projects as $project): ?>
-                        <option value="<?php echo $project['id']; ?>" <?php echo ($invoice_details['project_id'] ?? 0) == $project['id'] ? 'selected' : ''; ?>>
+                        <option value="<?php echo $project['id']; ?>" data-client="<?php echo htmlspecialchars($project['client'] ?? ''); ?>" <?php echo ($invoice_details['project_id'] ?? 0) == $project['id'] ? 'selected' : ''; ?>>
                             <?php echo htmlspecialchars($project['project_code'] . ' - ' . $project['name']); ?>
                         </option>
                     <?php endforeach; ?>
@@ -207,7 +282,35 @@ include '../../includes/header.php';
         <div class="form-row">
             <div class="form-group">
                 <label class="required">Client</label>
-                <input type="text" name="client" required value="<?php echo htmlspecialchars($invoice_details['client'] ?? ''); ?>" placeholder="Client name">
+                <?php if (!empty($invoice_locked)): ?>
+                    <input type="text" value="<?php echo htmlspecialchars(invoiceClientLabel($invoice_details)); ?>" readonly>
+                <?php else: ?>
+                    <select name="client_id" id="invoiceClient" required>
+                        <option value="">Select client</option>
+                        <?php foreach ($clients as $clientRow): ?>
+                            <?php
+                            $selectedClient = (int) ($invoice_details['client_id'] ?? 0) === (int) $clientRow['id']
+                                || ((int) ($invoice_details['client_id'] ?? 0) === 0 && isset($invoice_details) && strcasecmp(invoiceClientLabel($invoice_details), $clientRow['name']) === 0);
+                            ?>
+                            <option value="<?php echo (int) $clientRow['id']; ?>" data-name="<?php echo htmlspecialchars($clientRow['name']); ?>" <?php echo $selectedClient ? 'selected' : ''; ?>><?php echo htmlspecialchars($clientRow['name']); ?></option>
+                        <?php endforeach; ?>
+                        <?php
+                        $knownClientNames = [];
+                        foreach ($clients as $clientRow) {
+                            $knownClientNames[strtolower($clientRow['name'])] = true;
+                        }
+                        foreach ($projects as $project) {
+                            $projectClient = trim((string) ($project['client'] ?? ''));
+                            $key = strtolower($projectClient);
+                            if ($projectClient === '' || isset($knownClientNames[$key])) {
+                                continue;
+                            }
+                            $knownClientNames[$key] = true;
+                            ?>
+                            <option value="name:<?php echo htmlspecialchars($projectClient); ?>" data-name="<?php echo htmlspecialchars($projectClient); ?>"><?php echo htmlspecialchars($projectClient); ?></option>
+                        <?php } ?>
+                    </select>
+                <?php endif; ?>
             </div>
             <div class="form-group">
                 <label>Invoice Date</label>
@@ -222,7 +325,10 @@ include '../../includes/header.php';
         <div class="form-row">
             <div class="form-group">
                 <label class="required">Amount (₱)</label>
-                <input type="number" step="0.01" name="amount" required value="<?php echo $invoice_details['amount'] ?? 0; ?>" min="0">
+                <input type="number" step="0.01" name="amount" required value="<?php echo $invoice_details['amount'] ?? 0; ?>" min="0" <?php echo !empty($invoice_locked) ? 'readonly' : ''; ?>>
+                <?php if (!empty($invoice_locked)): ?>
+                    <small style="color:#64748b;">This amount is already in the ledger.</small>
+                <?php endif; ?>
             </div>
         </div>
         
@@ -244,11 +350,14 @@ include '../../includes/header.php';
     <h3>Invoice Details</h3>
     <div class="view-details">
         <div class="detail-row"><span>Invoice #:</span> <strong><?php echo htmlspecialchars($invoice_details['invoice_number']); ?></strong></div>
-        <div class="detail-row"><span>Client:</span> <?php echo htmlspecialchars($invoice_details['client']); ?></div>
+        <div class="detail-row"><span>Client Name:</span> <?php echo htmlspecialchars(invoiceClientLabel($invoice_details)); ?></div>
         <div class="detail-row"><span>Project:</span> <?php echo htmlspecialchars($invoice_details['project_name'] ?? 'N/A'); ?></div>
-        <div class="detail-row"><span>Amount:</span> <strong>₱<?php echo number_format($invoice_details['amount'], 2); ?></strong></div>
-        <div class="detail-row"><span>Paid Amount:</span> ₱<?php echo number_format($invoice_details['paid_amount'] ?? 0, 2); ?></div>
-        <div class="detail-row"><span>Balance:</span> <strong>₱<?php echo number_format(($invoice_details['amount'] - ($invoice_details['paid_amount'] ?? 0)), 2); ?></strong></div>
+        <?php if (!empty($invoice_details['quotation_number'])): ?>
+            <div class="detail-row"><span>Source Quotation:</span> <a href="quotations.php?action=view&id=<?php echo (int) $invoice_details['quotation_id']; ?>"><?php echo htmlspecialchars($invoice_details['quotation_number']); ?></a></div>
+        <?php endif; ?>
+        <div class="detail-row"><span>Invoice Amount:</span> <strong>₱<?php echo number_format($invoice_details['amount'], 2); ?></strong></div>
+        <div class="detail-row"><span>Amount Paid:</span> ₱<?php echo number_format($invoice_details['paid_amount'] ?? 0, 2); ?></div>
+        <div class="detail-row"><span>Remaining Balance:</span> <strong>₱<?php echo number_format(($invoice_details['amount'] - ($invoice_details['paid_amount'] ?? 0)), 2); ?></strong></div>
         <div class="detail-row"><span>Status:</span> <span class="badge badge-<?php echo $invoice_details['status']; ?>"><?php echo ucfirst($invoice_details['status']); ?></span></div>
         <div class="detail-row"><span>Invoice Date:</span> <?php echo date('M d, Y', strtotime($invoice_details['invoice_date'])); ?></div>
         <div class="detail-row"><span>Due Date:</span> <?php echo $invoice_details['due_date'] ? date('M d, Y', strtotime($invoice_details['due_date'])) : 'N/A'; ?></div>
@@ -259,6 +368,47 @@ include '../../includes/header.php';
         <?php endif; ?>
     </div>
     
+    <?php if (!empty($invoice_items)): ?>
+    <h4 style="margin-top:1.5rem;">Invoice Items</h4>
+    <div class="table-responsive">
+        <table class="table">
+            <thead><tr><th>Type</th><th>Description</th><th>Qty</th><th>Unit</th><th>Unit Price</th><th>Line Total</th></tr></thead>
+            <tbody>
+                <?php foreach ($invoice_items as $line): ?>
+                <tr>
+                    <td><?php echo ucfirst($line['line_type']); ?></td>
+                    <td><?php echo htmlspecialchars($line['description']); ?></td>
+                    <td><?php echo number_format($line['quantity'], 2); ?></td>
+                    <td><?php echo htmlspecialchars($line['unit']); ?></td>
+                    <td>₱<?php echo number_format($line['unit_price'], 2); ?></td>
+                    <td>₱<?php echo number_format($line['line_total'], 2); ?></td>
+                </tr>
+                <?php endforeach; ?>
+            </tbody>
+        </table>
+    </div>
+    <?php endif; ?>
+
+    <?php if (!empty($invoice_journal)): ?>
+    <h4 style="margin-top:1.5rem;">Accounting Entry</h4>
+    <div class="table-responsive">
+        <table class="table">
+            <thead><tr><th>Date</th><th>Reference</th><th>Account</th><th>Debit</th><th>Credit</th></tr></thead>
+            <tbody>
+                <?php foreach ($invoice_journal as $line): ?>
+                <tr>
+                    <td><?php echo date('M d, Y', strtotime($line['entry_date'])); ?></td>
+                    <td><?php echo htmlspecialchars($line['description']); ?></td>
+                    <td><?php echo htmlspecialchars($line['account_name']); ?></td>
+                    <td><?php echo (float) $line['debit'] > 0 ? '₱' . number_format($line['debit'], 2) : ''; ?></td>
+                    <td><?php echo (float) $line['credit'] > 0 ? '₱' . number_format($line['credit'], 2) : ''; ?></td>
+                </tr>
+                <?php endforeach; ?>
+            </tbody>
+        </table>
+    </div>
+    <?php endif; ?>
+
     <!-- Payments -->
     <h4 style="margin-top:1.5rem;">Payment History</h4>
     <?php if (empty($invoice_payments)): ?>
@@ -291,35 +441,48 @@ include '../../includes/header.php';
     <?php endif; ?>
     
     <!-- Record Payment -->
-    <?php if ($invoice_details['status'] !== 'paid' && $invoice_details['status'] !== 'cancelled'): ?>
+    <?php
+        $remaining_balance = round((float) $invoice_details['amount'] - (float) ($invoice_details['paid_amount'] ?? 0), 2);
+    ?>
+    <?php if (canWriteDepartmentData('accounting') && $invoice_details['status'] !== 'paid' && $invoice_details['status'] !== 'cancelled' && $remaining_balance > 0): ?>
     <div style="margin-top:1.5rem; padding-top:1.5rem; border-top:1px solid #e2e8f0;">
-        <h4>Record Payment</h4>
+        <h4>Cash Payment</h4>
         <form method="POST" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:1rem;align-items:end;">
             <input type="hidden" name="invoice_id" value="<?php echo $invoice_details['id']; ?>">
             <input type="hidden" name="record_payment" value="1">
             <div class="form-group">
-                <label>Amount</label>
-                <input type="number" step="0.01" name="payment_amount" required min="0" max="<?php echo $invoice_details['amount'] - ($invoice_details['paid_amount'] ?? 0); ?>">
+                <label>Invoice Number</label>
+                <input type="text" value="<?php echo htmlspecialchars($invoice_details['invoice_number']); ?>" disabled>
+            </div>
+            <div class="form-group">
+                <label>Client Name</label>
+                <input type="text" value="<?php echo htmlspecialchars(invoiceClientLabel($invoice_details)); ?>" disabled>
+            </div>
+            <div class="form-group">
+                <label>Invoice Amount</label>
+                <input type="text" value="₱<?php echo number_format($invoice_details['amount'], 2); ?>" disabled>
+            </div>
+            <div class="form-group">
+                <label>Remaining Balance</label>
+                <input type="text" value="₱<?php echo number_format($remaining_balance, 2); ?>" disabled>
+            </div>
+            <div class="form-group">
+                <label>Amount Paid</label>
+                <input type="number" step="0.01" name="payment_amount" required min="0.01" max="<?php echo $remaining_balance; ?>">
             </div>
             <div class="form-group">
                 <label>Payment Date</label>
                 <input type="date" name="payment_date" value="<?php echo date('Y-m-d'); ?>" required>
             </div>
             <div class="form-group">
-                <label>Method</label>
-                <select name="payment_method">
-                    <option value="">Select</option>
-                    <option value="Cash">Cash</option>
-                    <option value="Bank Transfer">Bank Transfer</option>
-                    <option value="Check">Check</option>
-                    <option value="Credit Card">Credit Card</option>
-                </select>
+                <label>Payment Reference</label>
+                <input type="text" name="reference_number" placeholder="OR / receipt number">
             </div>
             <div class="form-group">
-                <label>Reference #</label>
-                <input type="text" name="reference_number" placeholder="Reference number">
+                <label>Payment Method</label>
+                <input type="text" value="CASH" disabled>
             </div>
-            <button type="submit" class="btn btn-success"><i class="fas fa-check"></i> Record Payment</button>
+            <button type="submit" class="btn btn-success"><i class="fas fa-check"></i> Record Cash Payment</button>
         </form>
     </div>
     <?php endif; ?>
@@ -358,7 +521,7 @@ include '../../includes/header.php';
                     <?php foreach ($invoices as $inv): ?>
                     <tr>
                         <td><strong><?php echo htmlspecialchars($inv['invoice_number']); ?></strong></td>
-                        <td><?php echo htmlspecialchars($inv['client']); ?></td>
+                        <td><?php echo htmlspecialchars(invoiceClientLabel($inv)); ?></td>
                         <td><?php echo htmlspecialchars($inv['project_name'] ?? 'N/A'); ?></td>
                         <td>₱<?php echo number_format($inv['amount'], 2); ?></td>
                         <td>₱<?php echo number_format($inv['paid_amount'] ?? 0, 2); ?></td>
@@ -379,4 +542,23 @@ include '../../includes/header.php';
 </div>
 <?php endif; ?>
 
+<script>
+(function () {
+    const projectSelect = document.getElementById('invoiceProject');
+    const clientName = document.getElementById('invoiceClient');
+    if (!projectSelect || !clientName) return;
+    function applyProjectClient() {
+        const wanted = (projectSelect.selectedOptions[0]?.dataset.client || '').trim().toLowerCase();
+        if (!wanted) return;
+        for (const option of clientName.options) {
+            if ((option.dataset.name || '').trim().toLowerCase() === wanted) {
+                clientName.value = option.value;
+                return;
+            }
+        }
+    }
+    projectSelect.addEventListener('change', applyProjectClient);
+    if (!clientName.value) applyProjectClient();
+})();
+</script>
 <?php include '../../includes/footer.php'; ?>

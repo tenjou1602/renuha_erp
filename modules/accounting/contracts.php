@@ -39,7 +39,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $stmt->execute([$contract_number, $contract_name, $project_id, $client, $contract_value, $start_date, $end_date, $description, $status, $_SESSION['user_id']]);
                     
                     logActivity($_SESSION['user_id'], 'Created contract', 'Accounting', "Contract: $contract_number");
-                    $_SESSION['success'] = "Contract created successfully!";
+                    $_SESSION['success'] = ($status === 'active' && empty($project_id))
+                        ? 'Contract saved as active. Executive Admin can encode it as a project from Manage Projects.'
+                        : 'Contract created successfully!';
                 } else {
                     $stmt = $pdo->prepare("UPDATE contracts SET contract_number = ?, contract_name = ?, project_id = ?, client = ?, contract_value = ?, start_date = ?, end_date = ?, description = ?, status = ? WHERE id = ?");
                     $stmt->execute([$contract_number, $contract_name, $project_id, $client, $contract_value, $start_date, $end_date, $description, $status, $id]);
@@ -58,7 +60,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 // Handle Delete
 if (isset($_GET['delete_id']) && $action === 'delete') {
-    if (!canDelete('accounting')) {
+    if (!canWriteDepartmentData('accounting')) {
         $_SESSION['error'] = 'Administrators cannot delete contract records.';
         header('Location: contracts.php');
         exit();
@@ -121,7 +123,15 @@ try {
 }
 
 // Get projects for dropdown
-$projects = $pdo->query("SELECT id, project_code, name FROM projects WHERE status != 'completed' ORDER BY name")->fetchAll();
+$projects = $pdo->query("SELECT id, project_code, name, client, subject, estimated_budget, material_cost, labor_cost, start_date, end_date FROM projects WHERE status != 'completed' ORDER BY name")->fetchAll();
+$prefill_project = (int) ($_GET['project'] ?? 0);
+$from_project = null;
+foreach ($projects as $project) {
+    if ((int) $project['id'] === $prefill_project) {
+        $from_project = $project;
+        break;
+    }
+}
 
 // Get single contract for edit/view
 $contract_details = null;
@@ -214,6 +224,28 @@ include '../../includes/header.php';
     </div>
 </div>
 
+<?php if ($action === 'list'): ?>
+<div class="card">
+    <h3><i class="fas fa-chart-bar"></i> Contract / Project Amount</h3>
+    <canvas id="contractChart" height="90"></canvas>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<script>
+new Chart(document.getElementById('contractChart'), {
+    type: 'bar',
+    data: {
+        labels: <?php echo json_encode(array_map(static fn($c) => $c['contract_number'] ?? $c['contract_name'], array_slice($contracts, 0, 8))); ?>,
+        datasets: [{
+            label: 'Contract amount',
+            data: <?php echo json_encode(array_map(static fn($c) => (float) $c['contract_value'], array_slice($contracts, 0, 8))); ?>,
+            backgroundColor: '#36b9cc'
+        }]
+    },
+    options: { plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true } } }
+});
+</script>
+<?php endif; ?>
+
 <?php if ($action === 'add' || $action === 'edit'): ?>
 <!-- Add/Edit Form -->
 <div class="card">
@@ -232,43 +264,52 @@ include '../../includes/header.php';
             </div>
             <div class="form-group">
                 <label class="required">Contract Name</label>
-                <input type="text" name="contract_name" required value="<?php echo htmlspecialchars($contract_details['contract_name'] ?? ''); ?>" placeholder="Enter contract name">
+                <input type="text" name="contract_name" required value="<?php echo htmlspecialchars($contract_details['contract_name'] ?? ($from_project['name'] ?? '')); ?>" placeholder="Enter contract name">
             </div>
         </div>
         
         <div class="form-row">
             <div class="form-group">
                 <label>Project (Optional)</label>
-                <select name="project_id">
+                <select name="project_id" id="contractProject">
                     <option value="">No Project</option>
                     <?php foreach ($projects as $project): ?>
-                        <option value="<?php echo $project['id']; ?>" <?php echo ($contract_details['project_id'] ?? 0) == $project['id'] ? 'selected' : ''; ?>>
+                        <option value="<?php echo $project['id']; ?>"
+                            data-client="<?php echo htmlspecialchars($project['client'] ?? ''); ?>"
+                            data-name="<?php echo htmlspecialchars($project['name'] ?? ''); ?>"
+                            data-amount="<?php echo htmlspecialchars($project['estimated_budget'] ?? 0); ?>"
+                            data-material="<?php echo htmlspecialchars($project['material_cost'] ?? 0); ?>"
+                            data-labor="<?php echo htmlspecialchars($project['labor_cost'] ?? 0); ?>"
+                            data-start="<?php echo htmlspecialchars($project['start_date'] ?? ''); ?>"
+                            data-end="<?php echo htmlspecialchars($project['end_date'] ?? ''); ?>"
+                            <?php echo (int) ($contract_details['project_id'] ?? $prefill_project) === (int) $project['id'] ? 'selected' : ''; ?>>
                             <?php echo htmlspecialchars($project['project_code'] . ' - ' . $project['name']); ?>
                         </option>
                     <?php endforeach; ?>
                 </select>
+                <small id="contractSplit" style="display:block;margin-top:0.35rem;">Choosing a received project fills the contract amount from the quotation total, and shows its material and labor cost.</small>
             </div>
             <div class="form-group">
                 <label class="required">Client</label>
-                <input type="text" name="client" required value="<?php echo htmlspecialchars($contract_details['client'] ?? ''); ?>" placeholder="Client name">
+                <input type="text" name="client" required value="<?php echo htmlspecialchars($contract_details['client'] ?? ($from_project['client'] ?? '')); ?>" placeholder="Client name">
             </div>
         </div>
         
         <div class="form-row">
             <div class="form-group">
                 <label class="required">Contract Value (₱)</label>
-                <input type="number" step="0.01" name="contract_value" required value="<?php echo htmlspecialchars($contract_details['contract_value'] ?? 0); ?>" min="0" placeholder="0.00">
+                <input type="number" step="0.01" name="contract_value" required value="<?php echo htmlspecialchars($contract_details['contract_value'] ?? ($from_project['estimated_budget'] ?? 0)); ?>" min="0" placeholder="0.00">
             </div>
             <div class="form-group">
                 <label>Start Date</label>
-                <input type="date" name="start_date" value="<?php echo htmlspecialchars($contract_details['start_date'] ?? ''); ?>">
+                <input type="date" name="start_date" value="<?php echo htmlspecialchars($contract_details['start_date'] ?? ($from_project['start_date'] ?? '')); ?>">
             </div>
         </div>
         
         <div class="form-row">
             <div class="form-group">
                 <label>End Date</label>
-                <input type="date" name="end_date" value="<?php echo htmlspecialchars($contract_details['end_date'] ?? ''); ?>">
+                <input type="date" name="end_date" value="<?php echo htmlspecialchars($contract_details['end_date'] ?? ($from_project['end_date'] ?? '')); ?>">
             </div>
             <div class="form-group">
                 <label>Status</label>
@@ -284,7 +325,7 @@ include '../../includes/header.php';
         
         <div class="form-group">
             <label>Description</label>
-            <textarea name="description" rows="3" placeholder="Contract description"><?php echo htmlspecialchars($contract_details['description'] ?? ''); ?></textarea>
+            <textarea name="description" rows="3" placeholder="Contract description"><?php echo htmlspecialchars($contract_details['description'] ?? ($from_project ? ('From quotation. Material cost ₱' . number_format((float) $from_project['material_cost'], 2) . '. Labor cost ₱' . number_format((float) $from_project['labor_cost'], 2) . '.') : '')); ?></textarea>
         </div>
         
         <div style="margin-top:1.5rem;">
@@ -313,7 +354,10 @@ include '../../includes/header.php';
     </div>
     <div style="margin-top:1.5rem; display:flex; gap:0.5rem; flex-wrap:wrap;">
         <?php if (canWriteDepartmentData('accounting')): ?><a href="?action=edit&id=<?php echo $contract_details['id']; ?>" class="btn btn-warning"><i class="fas fa-edit"></i> Edit</a><?php endif; ?>
-        <?php if (canDelete('accounting')): ?><a href="?action=delete&delete_id=<?php echo $contract_details['id']; ?>" class="btn btn-danger" onclick="return confirm('Are you sure you want to delete this contract?')"><i class="fas fa-trash"></i> Delete</a><?php endif; ?>
+        <?php if (($contract_details['status'] ?? '') === 'active' && empty($contract_details['project_id'])): ?>
+            <a href="<?php echo APP_URL; ?>modules/projects/projects.php?action=add&source=contract:<?php echo (int) $contract_details['id']; ?>" class="btn btn-primary"><i class="fas fa-building"></i> Encode Project</a>
+        <?php endif; ?>
+        <?php if (canWriteDepartmentData('accounting')): ?><a href="?action=delete&delete_id=<?php echo $contract_details['id']; ?>" class="btn btn-danger" onclick="return confirm('Are you sure you want to delete this contract?')"><i class="fas fa-trash"></i> Delete</a><?php endif; ?>
         <a href="contracts.php" class="btn btn-secondary"><i class="fas fa-arrow-left"></i> Back</a>
     </div>
 </div>
@@ -370,8 +414,11 @@ include '../../includes/header.php';
                         <td>
                             <div style="display:flex; gap:0.3rem; flex-wrap:wrap;">
                                 <a href="?action=view&id=<?php echo $contract['id']; ?>" class="btn btn-sm btn-info" title="View"><i class="fas fa-eye"></i></a>
+                                <?php if (($contract['status'] ?? '') === 'active' && empty($contract['project_id'])): ?>
+                                    <a href="<?php echo APP_URL; ?>modules/projects/projects.php?action=add&source=contract:<?php echo (int) $contract['id']; ?>" class="btn btn-sm btn-primary" title="Encode project">Encode</a>
+                                <?php endif; ?>
                                 <?php if (canWriteDepartmentData('accounting')): ?><a href="?action=edit&id=<?php echo $contract['id']; ?>" class="btn btn-sm btn-warning" title="Edit"><i class="fas fa-edit"></i></a><?php endif; ?>
-                                <?php if (canDelete('accounting')): ?><a href="?action=delete&delete_id=<?php echo $contract['id']; ?>" class="btn btn-sm btn-danger" title="Delete" onclick="return confirm('Delete this contract?')"><i class="fas fa-trash"></i></a><?php endif; ?>
+                                <?php if (canWriteDepartmentData('accounting')): ?><a href="?action=delete&delete_id=<?php echo $contract['id']; ?>" class="btn btn-sm btn-danger" title="Delete" onclick="return confirm('Delete this contract?')"><i class="fas fa-trash"></i></a><?php endif; ?>
                             </div>
                         </td>
                     </tr>
@@ -414,3 +461,23 @@ document.getElementById('filterStatus')?.addEventListener('change', function() {
 <?php endif; ?>
 
 <?php include '../../includes/footer.php'; ?>
+<script>
+document.getElementById('contractProject')?.addEventListener('change', function () {
+    const option = this.selectedOptions[0];
+    const form = this.form;
+    const note = document.getElementById('contractSplit');
+    if (!option || !option.value) {
+        if (note) note.textContent = 'Choosing a received project fills the contract amount from the quotation total, and shows its material and labor cost.';
+        return;
+    }
+    if (option.dataset.name && !form.elements.contract_name.value) form.elements.contract_name.value = option.dataset.name;
+    if (option.dataset.client) form.elements.client.value = option.dataset.client;
+    if (option.dataset.amount) form.elements.contract_value.value = option.dataset.amount;
+    if (option.dataset.start) form.elements.start_date.value = option.dataset.start;
+    if (option.dataset.end) form.elements.end_date.value = option.dataset.end;
+    const material = Number(option.dataset.material || 0);
+    const labor = Number(option.dataset.labor || 0);
+    form.elements.description.value = 'From quotation. Material cost ₱' + material.toLocaleString(undefined, {minimumFractionDigits: 2}) + '. Labor cost ₱' + labor.toLocaleString(undefined, {minimumFractionDigits: 2}) + '.';
+    if (note) note.textContent = 'Quotation total ₱' + Number(option.dataset.amount || 0).toLocaleString(undefined, {minimumFractionDigits: 2}) + ' · Material ₱' + material.toLocaleString(undefined, {minimumFractionDigits: 2}) + ' · Labor ₱' + labor.toLocaleString(undefined, {minimumFractionDigits: 2});
+});
+</script>

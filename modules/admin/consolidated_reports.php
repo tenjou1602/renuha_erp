@@ -1,27 +1,41 @@
 <?php
 require_once '../../config/database.php';
 require_once '../../includes/auth.php';
+require_once '../../includes/accounting_ledger.php';
 
 requireAdmin();
 
 $page_title = 'Consolidated Reports';
 $report_type = $_GET['report'] ?? 'executive';
-$start_date = $_GET['start_date'] ?? date('Y-m-01');
+$start_date = $_GET['start_date'] ?? date('Y-01-01');
 $end_date = $_GET['end_date'] ?? date('Y-m-t');
 
 // Report data
 $report_data = [];
+try {
+    syncDepartmentWorkflow($pdo);
+} catch (Throwable $e) {
+    error_log('[Runeha ERP] department sync: ' . $e->getMessage());
+}
 try {
     switch ($report_type) {
         case 'executive':
             // Executive summary
             $report_data['total_projects'] = $pdo->query("SELECT COUNT(*) FROM projects")->fetchColumn() ?? 0;
             $report_data['total_budget'] = $pdo->query("SELECT COALESCE(SUM(estimated_budget), 0) FROM projects")->fetchColumn() ?? 0;
-            $report_data['total_actual_cost'] = $pdo->query("SELECT COALESCE(SUM(actual_cost), 0) FROM projects")->fetchColumn() ?? 0;
+            $report_data['total_actual_cost'] = $pdo->query("SELECT COALESCE(SUM(amount), 0) FROM expenses WHERE status IN ('pending', 'paid')")->fetchColumn() ?? 0;
             $report_data['total_revenue'] = $pdo->query("SELECT COALESCE(SUM(amount), 0) FROM invoices WHERE status = 'paid' AND created_at BETWEEN '$start_date' AND '$end_date 23:59:59'")->fetchColumn() ?? 0;
-            $report_data['total_expenses'] = $pdo->query("SELECT COALESCE(SUM(amount), 0) FROM expenses WHERE status = 'paid' AND created_at BETWEEN '$start_date' AND '$end_date 23:59:59'")->fetchColumn() ?? 0;
-            $report_data['procurement_value'] = $pdo->query("SELECT COALESCE(SUM(total_amount), 0) FROM purchase_requests WHERE status IN ('approved', 'confirmed', 'ordered', 'received') AND created_at BETWEEN '$start_date' AND '$end_date 23:59:59'")->fetchColumn() ?? 0;
+            $report_data['total_expenses'] = $pdo->query("SELECT COALESCE(SUM(amount), 0) FROM expenses WHERE status IN ('pending', 'paid') AND COALESCE(expense_date, created_at) BETWEEN '$start_date' AND '$end_date 23:59:59'")->fetchColumn() ?? 0;
+            $report_data['procurement_value'] = $pdo->query("SELECT COALESCE(SUM(total_amount), 0) FROM purchase_requests WHERE status IN ('approved', 'confirmed', 'ordered', 'received', 'completed') AND created_at BETWEEN '$start_date' AND '$end_date 23:59:59'")->fetchColumn() ?? 0;
             $report_data['inventory_value'] = $pdo->query("SELECT COALESCE(SUM(current_stock * cost_per_unit), 0) FROM materials WHERE status = 'active'")->fetchColumn() ?? 0;
+            $report_data['ledger'] = [];
+            $report_data['approved_quotations'] = 0;
+            try {
+                $report_data['ledger'] = ledgerAccountBalances();
+                $report_data['approved_quotations'] = $pdo->query("SELECT COALESCE(SUM(grand_total), 0) FROM client_quotations WHERE status = 'approved'")->fetchColumn() ?? 0;
+            } catch (PDOException $e) {
+                $report_data['ledger'] = [];
+            }
             
             // Department performance
             $report_data['dept_performance'] = [
@@ -58,6 +72,12 @@ try {
                 $report_data['fund_status'] = $pdo->query("SELECT fund_type, COUNT(*) as count, COALESCE(SUM(amount), 0) as total FROM funds WHERE status = 'active' GROUP BY fund_type")->fetchAll();
             } catch (PDOException $e) {
                 $report_data['fund_status'] = [];
+            }
+            $report_data['ledger'] = [];
+            try {
+                $report_data['ledger'] = ledgerAccountBalances();
+            } catch (PDOException $e) {
+                $report_data['ledger'] = [];
             }
             
             $report_data['contract_value'] = 0;
@@ -261,6 +281,16 @@ include '../../includes/header.php';
         <div class="value">₱<?php echo number_format($report_data['inventory_value'] ?? 0, 2); ?></div>
         <div class="label">Inventory Value</div>
     </div>
+    <div class="stat-card" style="border-left-color:#f6c23e;">
+        <div class="value">₱<?php echo number_format($report_data['approved_quotations'] ?? 0, 2); ?></div>
+        <div class="label">Approved Quotations (not invoiced)</div>
+    </div>
+    <?php foreach ($report_data['ledger'] ?? [] as $balance): ?>
+    <div class="stat-card" style="border-left-color:#6f42c1;">
+        <div class="value">₱<?php echo number_format($balance['balance'], 2); ?></div>
+        <div class="label">Ledger <?php echo htmlspecialchars($balance['name']); ?></div>
+    </div>
+    <?php endforeach; ?>
 </div>
 
 <div class="card">
@@ -322,6 +352,28 @@ include '../../includes/header.php';
         </table>
     </div>
 </div>
+
+<?php if (!empty($report_data['ledger'])): ?>
+<div class="card">
+    <h3>Cash Ledger</h3>
+    <p style="color:#64748b;">Balances come from issued invoices and cash collections. Approved quotations are not included.</p>
+    <div class="table-responsive">
+        <table class="table">
+            <thead><tr><th>Account</th><th>Debit</th><th>Credit</th><th>Balance</th></tr></thead>
+            <tbody>
+                <?php foreach ($report_data['ledger'] as $balance): ?>
+                <tr>
+                    <td><?php echo htmlspecialchars($balance['name']); ?></td>
+                    <td>₱<?php echo number_format($balance['total_debit'], 2); ?></td>
+                    <td>₱<?php echo number_format($balance['total_credit'], 2); ?></td>
+                    <td>₱<?php echo number_format($balance['balance'], 2); ?></td>
+                </tr>
+                <?php endforeach; ?>
+            </tbody>
+        </table>
+    </div>
+</div>
+<?php endif; ?>
 
 <div class="dashboard-grid">
     <div class="card">

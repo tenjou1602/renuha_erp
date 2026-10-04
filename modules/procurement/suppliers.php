@@ -214,12 +214,6 @@ include '../../includes/header.php';
                 <label>Address</label>
                 <textarea name="address" rows="2" placeholder="Complete address"><?php echo htmlspecialchars($supplier_details['address'] ?? ''); ?></textarea>
             </div>
-            <div class="form-group">
-                <label>TIN Number</label>
-                <input type="text" name="tin_number" value="<?php echo htmlspecialchars($supplier_details['tin_number'] ?? ''); ?>" placeholder="Tax Identification Number">
-            </div>
-        </div>
-        
         <div class="form-row">
             <div class="form-group">
                 <label>Status</label>

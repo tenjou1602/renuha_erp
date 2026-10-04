@@ -24,19 +24,15 @@ try {
             p.start_date,
             p.end_date,
             p.client,
-            COUNT(DISTINCT inv.id) as invoice_count,
-            COALESCE(SUM(CASE WHEN inv.status = 'paid' THEN inv.amount ELSE 0 END), 0) as paid_invoices,
-            COALESCE(SUM(inv.amount), 0) as total_invoices,
-            COUNT(DISTINCT exp.id) as expense_count,
-            COALESCE(SUM(CASE WHEN exp.status = 'paid' THEN exp.amount ELSE 0 END), 0) as paid_expenses,
-            COALESCE(SUM(exp.amount), 0) as total_expenses,
-            COUNT(DISTINCT pr.id) as purchase_request_count,
-            COALESCE(SUM(CASE WHEN pr.status IN ('approved', 'confirmed', 'ordered', 'received') THEN pr.total_amount ELSE 0 END), 0) as purchase_costs
+            (SELECT COUNT(*) FROM invoices inv WHERE inv.project_id = p.id) as invoice_count,
+            (SELECT COALESCE(SUM(CASE WHEN inv.status = 'paid' THEN inv.amount ELSE 0 END), 0) FROM invoices inv WHERE inv.project_id = p.id) as paid_invoices,
+            (SELECT COALESCE(SUM(inv.amount), 0) FROM invoices inv WHERE inv.project_id = p.id) as total_invoices,
+            (SELECT COUNT(*) FROM expenses exp WHERE exp.project_id = p.id) as expense_count,
+            (SELECT COALESCE(SUM(CASE WHEN exp.status = 'paid' THEN exp.amount ELSE 0 END), 0) FROM expenses exp WHERE exp.project_id = p.id) as paid_expenses,
+            (SELECT COALESCE(SUM(exp.amount), 0) FROM expenses exp WHERE exp.project_id = p.id) as total_expenses,
+            (SELECT COUNT(*) FROM purchase_requests pr WHERE pr.project_id = p.id) as purchase_request_count,
+            (SELECT COALESCE(SUM(CASE WHEN pr.status IN ('approved', 'confirmed', 'ordered', 'received', 'completed') THEN pr.total_amount ELSE 0 END), 0) FROM purchase_requests pr WHERE pr.project_id = p.id) as purchase_costs
         FROM projects p
-        LEFT JOIN invoices inv ON p.id = inv.project_id
-        LEFT JOIN expenses exp ON p.id = exp.project_id
-        LEFT JOIN purchase_requests pr ON p.id = pr.project_id
-        GROUP BY p.id, p.project_code, p.name, p.description, p.estimated_budget, p.actual_cost, p.status, p.start_date, p.end_date, p.client
         ORDER BY p.created_at DESC
     ";
     $project_records = $pdo->query($query)->fetchAll();
@@ -49,23 +45,21 @@ $project_details = null;
 $project_invoices = [];
 $project_expenses = [];
 $project_purchases = [];
+$project_client_quotes = [];
 if ($action === 'view' && $id > 0) {
     try {
         $stmt = $pdo->prepare("
             SELECT 
                 p.*,
                 (p.estimated_budget - p.actual_cost) as remaining_budget,
-                COUNT(DISTINCT inv.id) as invoice_count,
-                COALESCE(SUM(CASE WHEN inv.status = 'paid' THEN inv.amount ELSE 0 END), 0) as paid_invoices,
-                COALESCE(SUM(inv.amount), 0) as total_invoices,
-                COUNT(DISTINCT exp.id) as expense_count,
-                COALESCE(SUM(CASE WHEN exp.status = 'paid' THEN exp.amount ELSE 0 END), 0) as paid_expenses,
-                COALESCE(SUM(exp.amount), 0) as total_expenses
+                (SELECT COUNT(*) FROM invoices inv WHERE inv.project_id = p.id) as invoice_count,
+                (SELECT COALESCE(SUM(CASE WHEN inv.status = 'paid' THEN inv.amount ELSE 0 END), 0) FROM invoices inv WHERE inv.project_id = p.id) as paid_invoices,
+                (SELECT COALESCE(SUM(inv.amount), 0) FROM invoices inv WHERE inv.project_id = p.id) as total_invoices,
+                (SELECT COUNT(*) FROM expenses exp WHERE exp.project_id = p.id) as expense_count,
+                (SELECT COALESCE(SUM(CASE WHEN exp.status = 'paid' THEN exp.amount ELSE 0 END), 0) FROM expenses exp WHERE exp.project_id = p.id) as paid_expenses,
+                (SELECT COALESCE(SUM(exp.amount), 0) FROM expenses exp WHERE exp.project_id = p.id) as total_expenses
             FROM projects p
-            LEFT JOIN invoices inv ON p.id = inv.project_id
-            LEFT JOIN expenses exp ON p.id = exp.project_id
             WHERE p.id = ?
-            GROUP BY p.id
         ");
         $stmt->execute([$id]);
         $project_details = $stmt->fetch();
@@ -75,6 +69,10 @@ if ($action === 'view' && $id > 0) {
             $inv_stmt = $pdo->prepare("SELECT * FROM invoices WHERE project_id = ? ORDER BY created_at DESC");
             $inv_stmt->execute([$id]);
             $project_invoices = $inv_stmt->fetchAll();
+
+            $quote_stmt = $pdo->prepare("SELECT * FROM client_quotations WHERE project_id = ? ORDER BY created_at DESC");
+            $quote_stmt->execute([$id]);
+            $project_client_quotes = $quote_stmt->fetchAll();
             
             // Get project expenses
             $exp_stmt = $pdo->prepare("SELECT * FROM expenses WHERE project_id = ? ORDER BY created_at DESC");
@@ -125,6 +123,8 @@ include '../../includes/header.php';
     </div>
 </div>
 
+<p style="color:#64748b;margin-top:0;">Full billing and cost control for Accounting. The project in-charge sees the same budget as a read-only Budget View.</p>
+
 <?php if (isset($error)): ?>
     <div class="alert alert-danger"><?php echo htmlspecialchars($error); ?></div>
 <?php endif; ?>
@@ -163,6 +163,22 @@ include '../../includes/header.php';
         <div class="detail-row"><span>Estimated Budget:</span> <strong>₱<?php echo number_format($project_details['estimated_budget'], 2); ?></strong></div>
         <div class="detail-row"><span>Actual Cost:</span> <strong>₱<?php echo number_format($project_details['actual_cost'], 2); ?></strong></div>
         <div class="detail-row"><span>Remaining Budget:</span> <strong class="<?php echo $project_details['remaining_budget'] >= 0 ? 'budget-positive' : 'budget-negative'; ?>">₱<?php echo number_format($project_details['remaining_budget'], 2); ?></strong></div>
+        <?php
+            $quote_pipeline = 0;
+            foreach ($project_client_quotes as $quote_row) {
+                if ($quote_row['status'] === 'approved') {
+                    $quote_pipeline += (float) $quote_row['grand_total'];
+                }
+            }
+            $open_ar = 0;
+            foreach ($project_invoices as $invoice_row) {
+                if (in_array($invoice_row['status'], ['sent', 'partial', 'overdue'], true)) {
+                    $open_ar += (float) $invoice_row['amount'] - (float) ($invoice_row['paid_amount'] ?? 0);
+                }
+            }
+        ?>
+        <div class="detail-row"><span>Approved quotations (not invoiced):</span> ₱<?php echo number_format($quote_pipeline, 2); ?></div>
+        <div class="detail-row"><span>Open accounts receivable:</span> ₱<?php echo number_format($open_ar, 2); ?></div>
         <div class="detail-row"><span>Total Invoices:</span> <?php echo number_format($project_details['total_invoices'], 2); ?> (<?php echo $project_details['invoice_count']; ?> invoices)</div>
         <div class="detail-row"><span>Paid Invoices:</span> ₱<?php echo number_format($project_details['paid_invoices'], 2); ?></div>
         <div class="detail-row"><span>Total Expenses:</span> ₱<?php echo number_format($project_details['total_expenses'], 2); ?> (<?php echo $project_details['expense_count']; ?> expenses)</div>
@@ -172,6 +188,34 @@ include '../../includes/header.php';
     <div style="margin-top:1.5rem;">
         <a href="project_financials.php" class="btn btn-secondary"><i class="fas fa-arrow-left"></i> Back to List</a>
     </div>
+</div>
+
+<div class="card">
+    <h3 class="section-title"><i class="fas fa-file-signature"></i> Client Quotations</h3>
+    <p style="color:#64748b;">These are proposals. Only converted quotations have an invoice and a receivable.</p>
+    <?php if (empty($project_client_quotes)): ?>
+        <div class="empty-state">
+            <i class="fas fa-file-signature"></i>
+            <p>No client quotations for this project.</p>
+        </div>
+    <?php else: ?>
+        <div class="table-responsive">
+            <table class="table">
+                <thead><tr><th>Quotation #</th><th>Client</th><th>Grand Total</th><th>Status</th><th>Date</th></tr></thead>
+                <tbody>
+                    <?php foreach ($project_client_quotes as $quote_row): ?>
+                    <tr>
+                        <td><strong><?php echo htmlspecialchars($quote_row['quotation_number']); ?></strong></td>
+                        <td><?php echo htmlspecialchars($quote_row['client_name']); ?></td>
+                        <td>₱<?php echo number_format($quote_row['grand_total'], 2); ?></td>
+                        <td><span class="badge badge-<?php echo htmlspecialchars($quote_row['status']); ?>"><?php echo ucfirst($quote_row['status']); ?></span></td>
+                        <td><?php echo date('M d, Y', strtotime($quote_row['created_at'])); ?></td>
+                    </tr>
+                    <?php endforeach; ?>
+                </tbody>
+            </table>
+        </div>
+    <?php endif; ?>
 </div>
 
 <!-- Project Invoices -->
