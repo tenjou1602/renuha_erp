@@ -8,6 +8,87 @@ $page_title = 'Material Requirements';
 $action = $_GET['action'] ?? 'list';
 $project_id = (int)($_GET['project_id'] ?? 0);
 
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['send_to_procurement'])) {
+    if (!canSubmitMaterialRequirement()) {
+        $_SESSION['error'] = 'You cannot send a material request.';
+        header('Location: material_requirements.php');
+        exit();
+    }
+    $req_project = (int) ($_POST['project_id'] ?? 0);
+    $selected = array_map('intval', (array) ($_POST['materials'] ?? []));
+    $quantities = (array) ($_POST['qty'] ?? []);
+    if ($req_project <= 0 || !$selected) {
+        $_SESSION['error'] = 'Choose a project and at least one material.';
+    } else {
+        try {
+            $pdo->beginTransaction();
+            $prNumber = generateNumber('PR', 'purchase_requests', 'pr_number');
+            $pdo->prepare("INSERT INTO purchase_requests (pr_number, project_id, requestor_id, purpose, priority, status, created_by) VALUES (?, ?, ?, ?, 'medium', 'pending', ?)")
+                ->execute([$prNumber, $req_project, $_SESSION['user_id'], 'Material request from Engineering', $_SESSION['user_id']]);
+            $prId = (int) $pdo->lastInsertId();
+            $itemStmt = $pdo->prepare("INSERT INTO purchase_request_items (purchase_request_id, material_id, quantity, unit, estimated_cost) VALUES (?, ?, ?, ?, ?)");
+            $reqStmt = $pdo->prepare("INSERT INTO material_requests (project_id, material_id, quantity, request_date, status, requested_by, notes, purchase_request_id, flow_status) VALUES (?, ?, ?, CURDATE(), 'pending', ?, ?, ?, 'procurement')");
+            $saved = 0;
+            foreach ($selected as $materialId) {
+                $qty = (int) ($quantities[$materialId] ?? 0);
+                if ($materialId <= 0 || $qty <= 0) {
+                    continue;
+                }
+                $unitStmt = $pdo->prepare("SELECT unit, cost_per_unit FROM materials WHERE id = ?");
+                $unitStmt->execute([$materialId]);
+                $material = $unitStmt->fetch();
+                if (!$material) {
+                    continue;
+                }
+                $itemStmt->execute([$prId, $materialId, $qty, $material['unit'] ?: 'pcs', round($qty * (float) $material['cost_per_unit'], 2)]);
+                $reqStmt->execute([$req_project, $materialId, $qty, $_SESSION['user_id'], 'Sent to Procurement', $prId]);
+                $saved++;
+            }
+            if ($saved === 0) {
+                throw new RuntimeException('Enter a quantity for each selected material.');
+            }
+            $pdo->prepare("UPDATE purchase_requests SET total_amount = (SELECT COALESCE(SUM(estimated_cost), 0) FROM purchase_request_items WHERE purchase_request_id = ?) WHERE id = ?")->execute([$prId, $prId]);
+            $pdo->commit();
+            notify('procurement', 'material_request', 'Material request', $prNumber . ' has been sent to Procurement. They will buy the items, create the order and send it to the Warehouse.', 'modules/procurement/purchase_requests.php', $req_project, 'purchase_request', $prId);
+            $_SESSION['success'] = $prNumber . ' has been sent to Procurement. They will buy the items, create the order and send it to the Warehouse.';
+        } catch (Throwable $e) {
+            if ($pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
+            $_SESSION['error'] = $e instanceof PDOException ? userDatabaseError($e, 'Projects') : $e->getMessage();
+        }
+    }
+    header('Location: material_requirements.php' . ($req_project ? '?project_id=' . $req_project : ''));
+    exit();
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['engineer_receive'])) {
+    if (!canWriteDepartmentData('projects')) {
+        $_SESSION['error'] = 'You cannot receive materials.';
+    } else {
+        $requestId = (int) ($_POST['request_id'] ?? 0);
+        $stmt = $pdo->prepare("UPDATE material_requests SET flow_status = 'complete' WHERE id = ? AND requested_by = ? AND flow_status = 'released'");
+        $stmt->execute([$requestId, $_SESSION['user_id']]);
+        if ($stmt->rowCount() === 1) {
+            $pdo->prepare("UPDATE warehouse_releases SET status = 'received', received_at = NOW() WHERE material_request_id = ? AND status = 'released'")->execute([$requestId]);
+            $meta = $pdo->prepare("SELECT p.project_code, p.id AS project_id, pr.pr_number FROM material_requests mr INNER JOIN projects p ON p.id = mr.project_id LEFT JOIN purchase_requests pr ON pr.id = mr.purchase_request_id WHERE mr.id = ?");
+            $meta->execute([$requestId]);
+            $info = $meta->fetch() ?: [];
+            $ref = $info['pr_number'] ?? 'the request';
+            $pid = (int) ($info['project_id'] ?? 0);
+            $done = $ref . ' has been received by Engineering and is Complete.';
+            notify('warehouse', 'request_complete', 'Request complete', $done, 'modules/warehouse/material_requests.php', $pid, 'material_request', $requestId);
+            notify('procurement', 'request_complete', 'Request complete', $done, 'modules/procurement/purchase_requests.php', $pid, 'material_request', $requestId);
+            notify('admin', 'request_complete', 'Request complete', $done, 'modules/admin/project_monitoring.php', $pid, 'material_request', $requestId);
+            $_SESSION['success'] = 'Materials received. The request is complete.';
+        } else {
+            $_SESSION['error'] = 'That request is not waiting for you to receive it.';
+        }
+    }
+    header('Location: material_requirements.php');
+    exit();
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['request_warehouse_release'])) {
     if (!canRequestWarehouseRelease()) {
         $_SESSION['error'] = 'Administrators have view-only access.';
@@ -177,6 +258,74 @@ include '../../includes/header.php';
         </div>
         <button type="submit" name="request_warehouse_release" class="btn btn-primary">Send to Warehouse</button>
     </form>
+</div>
+<?php endif; ?>
+
+<div class="card">
+    <h3 class="section-title"><i class="fas fa-paper-plane"></i> Send Request to Procurement</h3>
+    <form method="POST">
+        <div class="form-group">
+            <label class="required">Project</label>
+            <select name="project_id" required>
+                <option value="">Select project</option>
+                <?php foreach ($projects as $project): ?>
+                    <option value="<?php echo (int) $project['id']; ?>" <?php echo $project_id === (int) $project['id'] ? 'selected' : ''; ?>><?php echo htmlspecialchars($project['project_code'] . ' - ' . $project['name']); ?></option>
+                <?php endforeach; ?>
+            </select>
+        </div>
+        <div class="table-responsive">
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th><label><input type="checkbox" id="selectAllMaterials"> Select all</label></th>
+                        <th>Material</th>
+                        <th>Stock</th>
+                        <th>Quantity</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <?php foreach ($all_materials as $material): ?>
+                    <tr>
+                        <td><input type="checkbox" class="material-check" name="materials[]" value="<?php echo (int) $material['id']; ?>"></td>
+                        <td><?php echo htmlspecialchars($material['material_code'] . ' - ' . $material['name']); ?></td>
+                        <td><?php echo number_format((float) $material['current_stock']); ?> <?php echo htmlspecialchars($material['unit']); ?></td>
+                        <td><input type="number" min="1" name="qty[<?php echo (int) $material['id']; ?>]" value="1" style="width:90px;"></td>
+                    </tr>
+                    <?php endforeach; ?>
+                </tbody>
+            </table>
+        </div>
+        <?php if (canSubmitMaterialRequirement()): ?>
+        <button type="submit" name="send_to_procurement" class="btn btn-primary">Send Request to Procurement</button>
+        <?php endif; ?>
+    </form>
+</div>
+<script>
+document.getElementById('selectAllMaterials')?.addEventListener('change', function () {
+    document.querySelectorAll('.material-check').forEach((box) => { box.checked = this.checked; });
+});
+</script>
+
+<?php
+$myReleases = [];
+try {
+    $rel = $pdo->prepare("SELECT mr.id, mr.quantity, mr.flow_status, m.name, p.project_code FROM material_requests mr INNER JOIN materials m ON m.id = mr.material_id INNER JOIN projects p ON p.id = mr.project_id WHERE mr.requested_by = ? AND mr.flow_status = 'released' ORDER BY mr.id DESC");
+    $rel->execute([$_SESSION['user_id']]);
+    $myReleases = $rel->fetchAll();
+} catch (PDOException $e) {
+    $myReleases = [];
+}
+?>
+<?php if ($myReleases): ?>
+<div class="card">
+    <h3>Materials released to you</h3>
+    <?php foreach ($myReleases as $release): ?>
+        <form method="POST" style="display:flex;gap:0.5rem;align-items:center;margin-bottom:0.4rem;">
+            <span><?php echo htmlspecialchars($release['project_code'] . ' — ' . $release['name'] . ' x ' . $release['quantity']); ?></span>
+            <input type="hidden" name="request_id" value="<?php echo (int) $release['id']; ?>">
+            <button type="submit" name="engineer_receive" class="btn btn-sm btn-success">Receive</button>
+        </form>
+    <?php endforeach; ?>
 </div>
 <?php endif; ?>
 

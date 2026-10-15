@@ -11,9 +11,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['receive_project'])) {
         $_SESSION['error'] = 'Administrators have view-only access.';
     } else {
         $projectId = (int) ($_POST['project_id'] ?? 0);
-        $stmt = $pdo->prepare("UPDATE projects SET accounting_received_at = NOW() WHERE id = ? AND accounting_received_at IS NULL");
+        $stmt = $pdo->prepare("UPDATE projects SET accounting_received_at = NOW(), accounting_status = 'received' WHERE id = ? AND accounting_status = 'pending'");
         $stmt->execute([$projectId]);
-        $_SESSION['success'] = 'Project received. You can record the quotation, budget, contract, and expenses.';
+        if ($stmt->rowCount() === 1) {
+            $pdo->prepare("UPDATE material_requests SET flow_status = 'warehouse' WHERE project_id = ? AND flow_status = 'accounting'")->execute([$projectId]);
+            $pdo->prepare("UPDATE purchase_orders po INNER JOIN purchase_requests pr ON pr.id = po.purchase_request_id SET po.status = 'ready_for_warehouse' WHERE pr.project_id = ? AND po.status IN ('sent', 'confirmed')")->execute([$projectId]);
+            notifyAccountingReceived($projectId);
+            $_SESSION['success'] = 'Project received. You can record the quotation, budget, contract, and expenses.';
+        }
     }
     header('Location: received_projects.php');
     exit();
@@ -22,9 +27,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['receive_project'])) {
 $projects = [];
 try {
     $projects = $pdo->query("
-        SELECT id, project_code, name, client, location, subject, estimated_budget, material_cost, labor_cost, status, quotation_path, quotation_name, accounting_received_at, created_at
+        SELECT id, project_code, name, client, location, subject, estimated_budget, status, quotation_path, quotation_name, accounting_received_at, accounting_status, created_by, created_at
         FROM projects
-        ORDER BY (accounting_received_at IS NULL) DESC, created_at DESC
+        WHERE accounting_status IN ('pending', 'received')
+        ORDER BY (accounting_status = 'pending') DESC, created_at DESC
     ")->fetchAll();
 } catch (PDOException $e) {
     $error = userDatabaseError($e, 'Accounting');
@@ -72,7 +78,7 @@ include '../../includes/header.php';
                     <td>
                         <strong><?php echo htmlspecialchars($project['project_code']); ?></strong><br>
                         <?php echo htmlspecialchars($project['name']); ?>
-                        <?php if (empty($project['accounting_received_at'])): ?>
+                        <?php if (($project['accounting_status'] ?? '') === 'pending'): ?>
                             <span class="badge badge-pending">New</span>
                         <?php else: ?>
                             <span class="badge badge-approved">Received</span>
@@ -81,10 +87,7 @@ include '../../includes/header.php';
                     <td><?php echo htmlspecialchars($project['client'] ?: '—'); ?></td>
                     <td><?php echo htmlspecialchars($project['location'] ?: '—'); ?></td>
                     <td><?php echo htmlspecialchars($project['subject'] ?: '—'); ?></td>
-                    <td>₱<?php echo number_format((float) $project['estimated_budget'], 2); ?><br>
-                        <small style="color:#047857;">Material ₱<?php echo number_format((float) ($project['material_cost'] ?? 0), 2); ?></small><br>
-                        <small style="color:#1d4ed8;">Labor ₱<?php echo number_format((float) ($project['labor_cost'] ?? 0), 2); ?></small>
-                    </td>
+                    <td>₱<?php echo number_format((float) $project['estimated_budget'], 2); ?></td>
                     <td><span class="badge badge-<?php echo htmlspecialchars($project['status']); ?>"><?php echo ucfirst($project['status']); ?></span></td>
                     <td style="white-space:nowrap;">
                         <?php if (!empty($project['quotation_path'])): ?>
@@ -95,7 +98,7 @@ include '../../includes/header.php';
                         <a class="btn btn-sm btn-outline" href="labor_budget.php?action=add&project=<?php echo (int) $project['id']; ?>">Labor</a>
                         <a class="btn btn-sm btn-outline" href="funds_budget.php?action=add&project=<?php echo (int) $project['id']; ?>">Funds</a>
                         <a class="btn btn-sm btn-outline" href="assign_in_charge.php?project=<?php echo (int) $project['id']; ?>">Assign</a>
-                        <?php if (empty($project['accounting_received_at']) && canWriteDepartmentData('accounting')): ?>
+                        <?php if (($project['accounting_status'] ?? '') === 'pending' && canWriteDepartmentData('accounting')): ?>
                             <form method="POST" style="display:inline;">
                                 <input type="hidden" name="receive_project" value="1">
                                 <input type="hidden" name="project_id" value="<?php echo (int) $project['id']; ?>">

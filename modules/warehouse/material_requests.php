@@ -76,6 +76,34 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         exit();
     }
 
+    if (isset($_POST['receive_materials'])) {
+        if (!canReceivePurchasedMaterials()) {
+            $_SESSION['error'] = 'You cannot receive materials.';
+            header('Location: material_requests.php');
+            exit();
+        }
+        $projectId = (int) ($_POST['project_id'] ?? 0);
+        if ($projectId <= 0) {
+            $_SESSION['error'] = 'Select a project.';
+        } else {
+            $received = $pdo->prepare("UPDATE purchase_orders po INNER JOIN purchase_requests pr ON pr.id = po.purchase_request_id SET po.status = 'delivered' WHERE pr.project_id = ? AND po.status = 'ready_for_warehouse'");
+            $received->execute([$projectId]);
+            if ($received->rowCount() < 1) {
+                $_SESSION['error'] = 'Materials cannot be marked received before Accounting sends the order to the Warehouse.';
+            } else {
+                $pdo->prepare("UPDATE purchase_requests SET status = 'completed' WHERE project_id = ? AND status IN ('ordered', 'received')")->execute([$projectId]);
+                $codes = $pdo->prepare("SELECT po.id, po.po_number FROM purchase_orders po INNER JOIN purchase_requests pr ON pr.id = po.purchase_request_id WHERE pr.project_id = ? AND po.status = 'delivered'");
+                $codes->execute([$projectId]);
+                foreach ($codes->fetchAll() as $poRow) {
+                    notify('procurement', 'po_received', 'Purchase order received', $poRow['po_number'] . ' has been received by the Warehouse and is now Completed.', 'modules/procurement/purchase_orders.php', $projectId, 'purchase_order', (int) $poRow['id']);
+                }
+                $_SESSION['success'] = 'Materials received. The purchase order is completed and ready for release to Engineering.';
+            }
+        }
+        header('Location: material_requests.php');
+        exit();
+    }
+
     if (isset($_POST['release_project_requests'])) {
         try {
             $result = releasePendingProjectMaterials($pdo, (int) ($_POST['project_id'] ?? 0), (int) $_SESSION['user_id']);
@@ -88,12 +116,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
             }
             logActivity($_SESSION['user_id'], 'Released inventory', 'Warehouse', $result['project_label'] . ': ' . implode(', ', $result['released']));
-            $message = 'Na-release papunta sa ' . $result['project_label'] . ': ' . implode(', ', $result['released']) . '. Naka-stock-out na. Puwede na itong tanggapin ng engineer para maging completed ang request.';
+            $message = 'Released to ' . $result['project_label'] . ': ' . implode(', ', $result['released']) . '. Stock has been issued. The engineer can confirm receipt to complete the request.';
             if ($result['short']) {
                 $shortNames = array_map(static function ($item) {
                     return $item['name'];
                 }, $result['short']);
-                $message .= ' Hindi kasama dahil kulang ang stock: ' . implode(', ', $shortNames) . '.';
+                $message .= ' Not included because stock is short: ' . implode(', ', $shortNames) . '.';
             }
             $_SESSION['success'] = $message;
             header('Location: material_requests.php');
@@ -156,7 +184,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $pdo->commit();
             
             logActivity($_SESSION['user_id'], 'Released inventory', 'Warehouse', "Request: $request_id, Material: {$request['material_name']}, Quantity: $release_quantity");
-            $_SESSION['success'] = 'Released ' . number_format($release_quantity) . ' to the project site. Naka-stock-out na.';
+            $_SESSION['success'] = 'Released ' . number_format($release_quantity) . ' to the project site. Stock has been issued.';
             header('Location: material_requests.php');
             exit();
         } catch (Exception $e) {
@@ -295,7 +323,7 @@ include '../../includes/header.php';
     <div class="alert alert-success"><?php echo htmlspecialchars($_SESSION['success']); unset($_SESSION['success']); ?></div>
 <?php endif; ?>
 
-<p style="color:#64748b;margin-top:0;">Pagkatapos mag-request ang Engineering kay Procurement, ma-order ito, at matanggap ng Warehouse, lalabas dito ang project code, location, at ang engineer na nag-request. Pindutin ang Release all to site. Iyon ang stock-out.</p>
+<p style="color:#64748b;margin-top:0;">When a material request is received and stock is available, release it to the project site. This is the stock-out.</p>
 
 <div class="card">
     <form method="GET" class="report-filters">
@@ -312,7 +340,7 @@ include '../../includes/header.php';
         </div>
     </form>
     <?php if ($selected_site): ?>
-        <p style="margin:0.75rem 0 0;"><strong><?php echo htmlspecialchars($selected_site['project_code']); ?></strong> · <?php echo htmlspecialchars($selected_site['location'] ?: 'Walang naka-save na location'); ?></p>
+        <p style="margin:0.75rem 0 0;"><strong><?php echo htmlspecialchars($selected_site['project_code']); ?></strong> · <?php echo htmlspecialchars($selected_site['location'] ?: 'No location saved'); ?></p>
     <?php endif; ?>
 </div>
 
@@ -366,7 +394,7 @@ include '../../includes/header.php';
     <?php elseif (empty($material_requests)): ?>
         <div class="empty-state">
             <i class="fas fa-clipboard-list"></i>
-            <p>Wala pang natanggap na order para i-release. Lalabas ito kapag na-request na ng Engineering kay Procurement, na-order na, at natanggap na ng Warehouse.</p>
+            <p>No order is waiting for release. It will appear after Engineering requests it, Procurement orders it, and the Warehouse receives it.</p>
         </div>
     <?php else: ?>
         <div class="table-responsive">
@@ -392,7 +420,7 @@ include '../../includes/header.php';
                         <td><strong>#<?php echo $request['id']; ?></strong></td>
                         <td>
                             <strong><?php echo htmlspecialchars($request['project_code'] ?? 'N/A'); ?></strong>
-                            <div style="color:#64748b;font-size:0.8rem;"><?php echo htmlspecialchars($request['project_location'] ?: 'Walang location'); ?></div>
+                            <div style="color:#64748b;font-size:0.8rem;"><?php echo htmlspecialchars($request['project_location'] ?: 'No location'); ?></div>
                         </td>
                         <td>
                             <?php echo htmlspecialchars($request['material_name'] ?? 'N/A'); ?>
@@ -410,7 +438,12 @@ include '../../includes/header.php';
                             <?php if ($request['status'] === 'pending' && canWriteDepartmentData('warehouse')): ?>
                                 <?php if (empty($projectReleaseShown[(int) $request['project_id']])): ?>
                                     <?php $projectReleaseShown[(int) $request['project_id']] = true; ?>
-                                    <form method="POST" style="display:inline;" onsubmit="return confirm('I-release ang lahat ng pending materials ng project na ito, sa dami na ni-request?');">
+                                    <form method="POST" style="display:inline;">
+                                        <input type="hidden" name="receive_materials" value="1">
+                                        <input type="hidden" name="project_id" value="<?php echo (int) $request['project_id']; ?>">
+                                        <button type="submit" class="btn btn-sm btn-success">Receive Materials</button>
+                                    </form>
+                                    <form method="POST" style="display:inline;" onsubmit="return confirm('Release all pending materials for this project in the requested quantities?');">
                                         <input type="hidden" name="release_project_requests" value="1">
                                         <input type="hidden" name="project_id" value="<?php echo (int) $request['project_id']; ?>">
                                         <button type="submit" class="btn btn-sm btn-primary"><i class="fas fa-arrow-up"></i> Release all to site</button>

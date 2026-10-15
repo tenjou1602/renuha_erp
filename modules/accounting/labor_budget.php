@@ -32,12 +32,12 @@ function laborFundMessage(PDO $pdo, int $projectId, float $payroll, float $labor
     $fund = $fundStmt->fetch();
     $base = $updated ? 'Labor budget updated.' : 'Labor budget created.';
     if (!$fund) {
-        return $base . ' Gumawa ng fund sa Funds & Budget Management para makonekta ang pasahod.';
+        return $base . ' Create a fund in Funds & Budget Management to connect the wages.';
     }
     $available = (float) $fund['amount'] - (float) $fund['allocated_amount'];
-    $text = $base . ' Na-allocate ang ₱' . number_format($payroll, 2) . ' sa fund na ' . $fund['fund_name'] . '. Available funds: ₱' . number_format($available, 2) . '.';
+    $text = $base . ' Allocated ₱' . number_format($payroll, 2) . ' to fund ' . $fund['fund_name'] . '. Available funds: ₱' . number_format($available, 2) . '.';
     if ($payroll > $laborLimit) {
-        $text .= ' Lampas ng ₱' . number_format($payroll - $laborLimit, 2) . ' sa labor cost ng quotation. Kailangan ng additional payment sa client.';
+        $text .= ' Over the quotation labor allowance by ₱' . number_format($payroll - $laborLimit, 2) . '. The client needs an additional payment.';
     }
     return $text;
 }
@@ -98,16 +98,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             ];
         }
         $payroll_total = round(array_sum(array_column($lines, 'line_total')), 2);
-        $allocated_amount = 0.0;
+        $allocated_amount = $payroll_total;
         if ($project_id <= 0) {
-            $errors[] = 'Select the project so the allocated amount comes from the quotation.';
-        } else {
-            $laborStmt = $pdo->prepare("SELECT labor_cost FROM projects WHERE id = ?");
-            $laborStmt->execute([$project_id]);
-            $allocated_amount = round((float) $laborStmt->fetchColumn(), 2);
-            if ($allocated_amount <= 0) {
-                $errors[] = 'This project quotation has no labor cost yet. Re-attach the quotation on the project first.';
-            }
+            $errors[] = 'Select the project for this labor budget.';
         }
         if ($payroll_total <= 0) {
             $errors[] = 'Enter at least one role with a wage and how many to assign.';
@@ -255,7 +248,7 @@ try {
 }
 
 // Get projects for dropdown
-$projects = $pdo->query("SELECT id, project_code, name, labor_cost, material_cost, estimated_budget FROM projects WHERE status != 'completed' ORDER BY name")->fetchAll();
+$projects = $pdo->query("SELECT id, project_code, name, estimated_budget FROM projects WHERE status != 'completed' ORDER BY name")->fetchAll();
 $project_funds = [];
 try {
     foreach ($pdo->query("SELECT id, fund_name, amount, project_id FROM funds WHERE status = 'active' AND project_id IS NOT NULL ORDER BY id") as $fundRow) {
@@ -280,7 +273,7 @@ $users = $pdo->query("SELECT id, full_name, department FROM users WHERE status =
 $budget_details = null;
 if ($action === 'edit' || $action === 'view') {
     $stmt = $pdo->prepare("
-        SELECT lb.*, p.project_code, p.name as project_name, p.labor_cost as quotation_labor, u.full_name as user_name, u.department as user_department,
+        SELECT lb.*, p.project_code, p.name as project_name, p.estimated_budget, u.full_name as user_name, u.department as user_department,
                (lb.allocated_amount - lb.used_amount) as remaining_amount,
                ub.full_name as created_by_name
         FROM labor_budgets lb
@@ -309,7 +302,7 @@ if ($id > 0) {
         $crew_lines = [];
     }
 }
-$quote_labor = (float) (is_array($budget_details) ? ($budget_details['quotation_labor'] ?? 0) : ($from_project['labor_cost'] ?? 0));
+$quote_labor = (float) (is_array($budget_details) ? ($budget_details['allocated_amount'] ?? 0) : 0);
 
 if (($action === 'add' || $action === 'edit') && !canWriteDepartmentData('accounting')) {
     $_SESSION['error'] = 'Administrators have view-only access.';
@@ -420,7 +413,7 @@ new Chart(document.getElementById('laborChart'), {
                     <option value="">No Project</option>
                     <?php foreach ($projects as $project): ?>
                         <option value="<?php echo $project['id']; ?>"
-                            data-labor="<?php echo htmlspecialchars($project['labor_cost'] ?? 0); ?>"
+                            data-budget="<?php echo htmlspecialchars($project['estimated_budget'] ?? 0); ?>"
                             data-name="<?php echo htmlspecialchars($project['name'] ?? ''); ?>"
                             data-fund="<?php echo htmlspecialchars($project_funds[(int) $project['id']]['fund_name'] ?? ''); ?>"
                             data-fund-amount="<?php echo htmlspecialchars($project_funds[(int) $project['id']]['amount'] ?? 0); ?>"
@@ -430,13 +423,13 @@ new Chart(document.getElementById('laborChart'), {
                         </option>
                     <?php endforeach; ?>
                 </select>
-                <small>Labor cost comes from the quotation attached by Executive Admin.</small>
+                <small>The project estimated budget stays on the project. This page only plans wages.</small>
                 <small id="laborFundNote" style="display:block;margin-top:0.35rem;"></small>
             </div>
         </div>
 
         <h4 style="margin:1rem 0 0.5rem;">Personnel wages</h4>
-        <p style="color:#64748b;margin-top:0;">Ilagay kung ilan ang kukunin, magkano ang pasahod, at ilan ang ia-assign. Ang planned wages ang Allocated Amount sa Funds &amp; Budget Management.</p>
+        <p style="color:#64748b;margin-top:0;">Enter how many people to hire, the wage, and how many to assign. Planned wages are the labor budget. They are not included in actual cost.</p>
         <div class="table-responsive">
             <table class="table">
                 <thead>
@@ -473,12 +466,12 @@ new Chart(document.getElementById('laborChart'), {
             <div class="form-group">
                 <label>Allocated Amount (₱)</label>
                 <input type="number" step="0.01" id="allocatedAmount" name="allocated_amount" readonly value="<?php echo htmlspecialchars($quote_labor); ?>" style="background:#eff6ff;font-weight:700;color:#1d4ed8;">
-                <small>Automatic mula sa labor cost ng quotation. Ito ang limit ng pasahod.</small>
+                <small>This is the planned wages total. It is not taken from the project and is not actual cost.</small>
             </div>
             <div class="form-group">
                 <label>Planned wages (₱)</label>
                 <input type="text" id="plannedWages" readonly value="0.00" style="background:#f8fafc;font-weight:700;">
-                <small id="laborLimitNote">Ihambing ito sa Allocated Amount.</small>
+                <small id="laborLimitNote">Compare this with the planned wage total.</small>
             </div>
         </div>
         
@@ -528,18 +521,18 @@ new Chart(document.getElementById('laborChart'), {
         <div class="detail-row"><span>Fund:</span> <a href="funds_budget.php?action=view&id=<?php echo (int) $viewFund['id']; ?>"><?php echo htmlspecialchars($viewFund['fund_name']); ?></a></div>
         <?php endif; ?>
         <div class="detail-row"><span>Personnel:</span> <?php echo htmlspecialchars($budget_details['position'] ?? 'N/A'); ?></div>
-        <div class="detail-row"><span>Allocated Amount:</span> <strong>₱<?php echo number_format((float) ($budget_details['quotation_labor'] ?? $budget_details['allocated_amount']), 2); ?></strong></div>
+        <div class="detail-row"><span>Allocated Amount:</span> <strong>₱<?php echo number_format((float) ($budget_details['allocated_amount'] ?? 0), 2); ?></strong></div>
         <?php
             $plannedWages = 0.0;
             foreach ($crew_lines as $line) {
                 $plannedWages += (float) $line['line_total'];
             }
-            $laborLimit = (float) ($budget_details['quotation_labor'] ?? $budget_details['allocated_amount']);
+            $laborLimit = (float) ($budget_details['allocated_amount'] ?? 0);
             $laborGap = $plannedWages - $laborLimit;
         ?>
         <?php if ($crew_lines): ?>
-        <?php if ($laborGap > 0): ?>
-        <div class="alert alert-danger">Planned wages exceed the quotation by ₱<?php echo number_format($laborGap, 2); ?>. Request additional payment from the client.</div>
+        <?php if ($laborGap > 0.009): ?>
+        <div class="alert alert-danger">Planned wages exceed the allocated amount by ₱<?php echo number_format($laborGap, 2); ?>.</div>
         <?php endif; ?>
         <div class="table-responsive" style="margin-top:1rem;">
             <table class="table">
@@ -684,24 +677,24 @@ document.getElementById('laborProject')?.addEventListener('change', function () 
     if (option.dataset.name && !this.form.elements.budget_name.value) {
         this.form.elements.budget_name.value = option.dataset.name + ' labor';
     }
-    if (amount) amount.value = Number(option.dataset.labor || 0).toFixed(2);
+    if (amount && !parseFloat(amount.value)) amount.value = '0.00';
     if (note) {
         const money = (value) => '₱' + Number(value || 0).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
         note.textContent = '';
         if (option.dataset.fundId && option.dataset.fundId !== '0') {
-            note.append('Connected sa fund na ');
+            note.append('Connected to fund ');
             const link = document.createElement('a');
             link.href = 'funds_budget.php?action=view&id=' + option.dataset.fundId;
             link.textContent = option.dataset.fund || 'fund';
             note.append(link);
-            note.append('. Total ' + money(option.dataset.fundAmount) + '. Ang planned wages ang magiging Allocated Amount nito.');
+            note.append('. Total ' + money(option.dataset.fundAmount) + '. Planned wages stay on the labor budget and are not actual cost.');
         } else {
-            note.append('Walang fund pa para sa project na ito. ');
+            note.append('This project does not have a fund yet. ');
             const link = document.createElement('a');
             link.href = 'funds_budget.php?action=add&project=' + option.value;
-            link.textContent = 'Gumawa ng fund';
+            link.textContent = 'Create a fund';
             note.append(link);
-            note.append(' para makonekta ang pasahod.');
+            note.append(' to connect the wages.');
         }
     }
     refreshLaborTotal();
@@ -723,18 +716,10 @@ function refreshLaborTotal() {
     const amount = document.getElementById('allocatedAmount');
     const note = document.getElementById('laborLimitNote');
     if (planned) planned.value = total.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
-    const limit = amount ? (parseFloat(amount.value) || 0) : 0;
+    if (amount) amount.value = total.toFixed(2);
     if (!note) return;
-    if (limit <= 0) {
-        note.textContent = 'Walang labor cost sa quotation ng project.';
-        note.style.color = '#b45309';
-    } else if (total > limit) {
-        note.textContent = 'Lampas ng ₱' + (total - limit).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2}) + '. Kailangan ng additional payment sa client.';
-        note.style.color = '#e74a3b';
-    } else {
-        note.textContent = 'Pasok sa quotation. Natitira: ₱' + (limit - total).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2}) + '.';
-        note.style.color = '#047857';
-    }
+    note.textContent = 'Planned wages are saved as the allocated amount. They are not added to project actual cost.';
+    note.style.color = '#047857';
 }
 document.querySelectorAll('.crew-row input').forEach((input) => input.addEventListener('input', refreshLaborTotal));
 refreshLaborTotal();

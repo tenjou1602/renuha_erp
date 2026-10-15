@@ -23,7 +23,7 @@ try {
             // Executive summary
             $report_data['total_projects'] = $pdo->query("SELECT COUNT(*) FROM projects")->fetchColumn() ?? 0;
             $report_data['total_budget'] = $pdo->query("SELECT COALESCE(SUM(estimated_budget), 0) FROM projects")->fetchColumn() ?? 0;
-            $report_data['total_actual_cost'] = $pdo->query("SELECT COALESCE(SUM(amount), 0) FROM expenses WHERE status IN ('pending', 'paid')")->fetchColumn() ?? 0;
+            $report_data['total_actual_cost'] = $pdo->query("SELECT COALESCE(SUM(actual_cost), 0) FROM v_project_costs")->fetchColumn() ?? 0;
             $report_data['total_revenue'] = $pdo->query("SELECT COALESCE(SUM(amount), 0) FROM invoices WHERE status = 'paid' AND created_at BETWEEN '$start_date' AND '$end_date 23:59:59'")->fetchColumn() ?? 0;
             $report_data['total_expenses'] = $pdo->query("SELECT COALESCE(SUM(amount), 0) FROM expenses WHERE status IN ('pending', 'paid') AND COALESCE(expense_date, created_at) BETWEEN '$start_date' AND '$end_date 23:59:59'")->fetchColumn() ?? 0;
             $report_data['procurement_value'] = $pdo->query("SELECT COALESCE(SUM(total_amount), 0) FROM purchase_requests WHERE status IN ('approved', 'confirmed', 'ordered', 'received', 'completed') AND created_at BETWEEN '$start_date' AND '$end_date 23:59:59'")->fetchColumn() ?? 0;
@@ -58,12 +58,13 @@ try {
         case 'financial':
             // Financial consolidation
             $report_data['project_financials'] = $pdo->query("
-                SELECT p.project_code, p.name, p.estimated_budget, p.actual_cost, (p.estimated_budget - p.actual_cost) as remaining,
+                SELECT p.project_code, p.name, p.estimated_budget, vpc.actual_cost, vpc.budget_variance as remaining,
                        COALESCE(SUM(inv.amount), 0) as invoices, COALESCE(SUM(exp.amount), 0) as expenses
                 FROM projects p
+                LEFT JOIN v_project_costs vpc ON vpc.project_id = p.id
                 LEFT JOIN invoices inv ON p.id = inv.project_id
                 LEFT JOIN expenses exp ON p.id = exp.project_id
-                GROUP BY p.id, p.project_code, p.name, p.estimated_budget, p.actual_cost
+                GROUP BY p.id, p.project_code, p.name, p.estimated_budget, vpc.actual_cost, vpc.budget_variance
                 ORDER BY p.created_at DESC
             ")->fetchAll();
             

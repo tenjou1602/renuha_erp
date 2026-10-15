@@ -40,14 +40,6 @@ function extractQuotationUpload(array $file): array
         $total += round(((float) $item['quantity']) * ((float) $item['unit_price']), 2);
     }
     $parsed['grand_total'] = round($total, 2);
-    $material = 0.0;
-    $labor = 0.0;
-    foreach ($parsed['items'] as $item) {
-        $material += (float) ($item['material_cost'] ?? 0);
-        $labor += (float) ($item['labor_cost'] ?? 0);
-    }
-    $parsed['material_total'] = round($material, 2);
-    $parsed['labor_total'] = round($labor, 2);
     return $parsed;
 }
 
@@ -292,16 +284,12 @@ function quotationInterpretBoq(array $book): ?array
     if (!empty($meta['date'])) {
         $notes[] = 'BOQ date: ' . $meta['date'];
     }
-    $notes[] = 'Each line uses the BOQ amount column (material plus labor). Section subtotals are skipped. 12% VAT is kept as its own line so the total matches the file.';
+    $notes[] = 'Each line uses the BOQ amount column. Section subtotals are skipped. 12% VAT is kept as its own line so the total matches the file.';
 
     $section = '';
     $category = '';
     $detail = '';
     $map = $header['map'];
-    $map = array_merge($map, quotationBoqCostColumns($book['lines'][$header['index']]['cells']));
-    if (isset($book['lines'][$header['index'] + 1])) {
-        $map = array_merge($map, quotationBoqCostColumns($book['lines'][$header['index'] + 1]['cells']));
-    }
     foreach (array_slice($book['lines'], $header['index'] + 1) as $line) {
         $cells = $line['cells'];
         $desc = trim((string) ($cells[$map['description']] ?? ''));
@@ -363,8 +351,6 @@ function quotationInterpretBoq(array $book): ?array
             $details = trim($details . "\n" . $spec);
         }
         $target = round($amount, 2);
-        $materialAmt = isset($map['material']) ? round(quotationNumber($cells[$map['material']] ?? 0), 2) : 0.0;
-        $laborAmt = isset($map['labor']) ? round(quotationNumber($cells[$map['labor']] ?? 0), 2) : 0.0;
         $price = $target > 0 ? round($target / $qty, 2) : 0.0;
         if ($target > 0 && round($qty * $price, 2) !== $target) {
             $step = round($qty * $price, 2) > $target ? -0.01 : 0.01;
@@ -378,7 +364,7 @@ function quotationInterpretBoq(array $book): ?array
                 $price = $target;
             }
         }
-        $result['items'][] = quotationBoqItem($name, $details, $qty, $unit !== '' ? $unit : 'lot', $price, $materialAmt, $laborAmt);
+        $result['items'][] = quotationBoqItem($name, $details, $qty, $unit !== '' ? $unit : 'lot', $price);
     }
     $result['notes'] = implode("\n", $notes);
     return $result['items'] ? $result : null;
@@ -399,10 +385,6 @@ function quotationBoqHeader(array $row): ?array
             $map['item'] = $index;
         } elseif ($label === 'amount' && !isset($map['amount'])) {
             $map['amount'] = $index;
-        } elseif ($label === 'material cost') {
-            $map['material'] = $index;
-        } elseif ($label === 'labor cost') {
-            $map['labor'] = $index;
         }
     }
     if (!isset($map['description'], $map['quantity'], $map['amount'], $map['unit'], $map['item'])) {
@@ -461,21 +443,7 @@ function quotationIsVatLine(string $text): bool
     return (bool) preg_match('/\bvat\b/i', $text);
 }
 
-function quotationBoqCostColumns(array $row): array
-{
-    $map = [];
-    foreach ($row as $index => $cell) {
-        $label = strtolower(trim((string) $cell));
-        if ($label === 'material cost') {
-            $map['material'] = $index;
-        } elseif ($label === 'labor cost') {
-            $map['labor'] = $index;
-        }
-    }
-    return $map;
-}
-
-function quotationBoqItem(string $name, string $description, float $qty, string $unit, float $price, float $material = 0, float $labor = 0): array
+function quotationBoqItem(string $name, string $description, float $qty, string $unit, float $price): array
 {
     return [
         'line_type' => 'other',
@@ -484,8 +452,6 @@ function quotationBoqItem(string $name, string $description, float $qty, string 
         'quantity' => $qty,
         'unit' => $unit,
         'unit_price' => $price,
-        'material_cost' => round($material, 2),
-        'labor_cost' => round($labor, 2),
     ];
 }
 

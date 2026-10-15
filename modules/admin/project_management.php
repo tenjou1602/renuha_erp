@@ -15,8 +15,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['add_project']) || is
     $description = trim($_POST['description'] ?? '');
     $location = trim($_POST['location'] ?? '');
     $client = trim($_POST['client'] ?? '');
-    $start_date = trim($_POST['start_date'] ?? '') ?: null;
-    $end_date = trim($_POST['end_date'] ?? '') ?: null;
+    $start_date = nullableDate($_POST['start_date'] ?? '');
+    $end_date = nullableDate($_POST['end_date'] ?? '');
     $status = $_POST['status'] ?? 'approved';
     $estimated_budget = (float) ($_POST['estimated_budget'] ?? 0);
     $assigned_to = (int) ($_POST['assigned_to'] ?? 0) ?: null;
@@ -29,8 +29,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['add_project']) || is
     if ($name === '') {
         $errors[] = 'Project name is required.';
     }
-    if ($estimated_budget < 0) {
-        $errors[] = 'Estimated budget cannot be negative.';
+    if ($estimated_budget <= 0) {
+        $errors[] = 'Estimated budget must be greater than 0.';
+    }
+    if ($start_date !== null && $end_date !== null && $end_date < $start_date) {
+        $errors[] = 'End date must be on or after the start date.';
     }
 
     if (empty($errors)) {

@@ -294,8 +294,7 @@ function ensureRunehaWorkflowSchema() {
         'subject' => 'subject TEXT NULL',
         'accounting_received_at' => 'accounting_received_at DATETIME NULL',
         'engineering_received_at' => 'engineering_received_at DATETIME NULL',
-        'material_cost' => 'material_cost DECIMAL(15,2) NOT NULL DEFAULT 0.00',
-        'labor_cost' => 'labor_cost DECIMAL(15,2) NOT NULL DEFAULT 0.00',
+        'accounting_status' => "accounting_status ENUM('pending','received','quoted','rejected') NOT NULL DEFAULT 'pending'",
     ] as $name => $ddl) {
         try {
             $col = $pdo->query("SHOW COLUMNS FROM projects LIKE " . $pdo->quote($name))->fetch();
@@ -356,28 +355,40 @@ function ensureRunehaWorkflowSchema() {
     syncProjectActualCosts();
 }
 
-function syncProjectActualCosts(): void {
-    global $pdo;
-    if (!isset($pdo)) {
-        return;
+function nullableDate($value): ?string {
+    $value = trim((string) $value);
+    if ($value === '' || $value === '0000-00-00') {
+        return null;
     }
-    try {
-        $pdo->exec("UPDATE projects p
-            LEFT JOIN (
-                SELECT project_id, SUM(amount) AS total
-                FROM expenses
-                WHERE status IN ('pending', 'paid') AND project_id IS NOT NULL AND project_id > 0
-                GROUP BY project_id
-            ) e ON e.project_id = p.id
-            LEFT JOIN (
-                SELECT b.project_id, COALESCE(SUM(l.line_total), 0) AS total
-                FROM labor_budgets b
-                INNER JOIN labor_budget_lines l ON l.labor_budget_id = b.id
-                WHERE b.status = 'active' AND b.project_id IS NOT NULL
-                GROUP BY b.project_id
-            ) w ON w.project_id = p.id
-            SET p.actual_cost = COALESCE(e.total, 0) + COALESCE(w.total, 0)");
-    } catch (PDOException $e) {
-        error_log('[Runeha ERP] sync project actual cost: ' . $e->getMessage());
+    $date = DateTime::createFromFormat('Y-m-d', $value);
+    if (!$date || $date->format('Y-m-d') !== $value) {
+        return null;
     }
+    return $value;
 }
+
+function formatDisplayDate($value): string {
+    $value = nullableDate($value);
+    if ($value === null) {
+        return 'Not set';
+    }
+    return date('M d, Y', strtotime($value));
+}
+
+function projectPurchaseCostSql(string $projectRef = 'p.id'): string {
+    return "COALESCE((SELECT purchase_total FROM v_project_costs WHERE project_id = {$projectRef}), 0)";
+}
+
+function projectExpenseCostSql(string $projectRef = 'p.id'): string {
+    return "COALESCE((SELECT expense_total FROM v_project_costs WHERE project_id = {$projectRef}), 0)";
+}
+
+function projectActualCostSql(string $projectRef = 'p.id'): string {
+    return "COALESCE((SELECT actual_cost FROM v_project_costs WHERE project_id = {$projectRef}), 0)";
+}
+
+function syncProjectActualCosts(): void {
+    // Actual cost is calculated by v_project_costs. It is not written back to projects.
+}
+
+require_once __DIR__ . '/../includes/notifications.php';

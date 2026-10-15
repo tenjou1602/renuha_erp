@@ -76,22 +76,20 @@ function adminProjectRows(PDO $pdo): array
 {
     $rows = $pdo->query("
         SELECT p.*,
+               vpc.actual_cost,
+               vpc.pending_cost,
+               vpc.budget_variance,
                COALESCE(ua.full_name, ui.full_name) AS engineer_name,
-               COALESCE((
-                   SELECT SUM(e.amount)
-                   FROM expenses e
-                   WHERE e.project_id = p.id AND e.status <> 'cancelled'
-               ), 0) AS expense_total
+               vpc.expense_total
         FROM projects p
+        LEFT JOIN v_project_costs vpc ON vpc.project_id = p.id
         LEFT JOIN users ua ON p.assigned_to = ua.id
         LEFT JOIN users ui ON p.in_charge_id = ui.id
         ORDER BY p.created_at DESC
     ")->fetchAll();
 
     foreach ($rows as &$row) {
-        $stored = (float) ($row['actual_cost'] ?? 0);
-        $expenses = (float) ($row['expense_total'] ?? 0);
-        $row['cost_to_date'] = $stored > 0 ? $stored : $expenses;
+        $row['cost_to_date'] = (float) ($row['actual_cost'] ?? 0);
         $row['stage'] = adminProjectStage($row);
         $row['progress_pct'] = adminProjectProgress($row);
     }

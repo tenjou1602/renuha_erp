@@ -57,17 +57,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['receive_site_material
         $check->execute([$requestId]);
         $request = $check->fetch();
         if (!$request) {
-            throw new RuntimeException('Hindi makita ang request.');
+            throw new RuntimeException('The request could not be found.');
         }
         if ($request['status'] === 'completed') {
-            throw new RuntimeException('Completed na ang request na ito.');
+            throw new RuntimeException('This request is already completed.');
         }
         if ((int) $request['release_lines'] < 1 || (int) $request['released_lines'] !== (int) $request['release_lines']) {
-            throw new RuntimeException('Hindi pa na-release ng Warehouse ang lahat ng materials sa site.');
+            throw new RuntimeException('The Warehouse has not released every material to the site yet.');
         }
         $pdo->prepare("UPDATE purchase_requests SET status = 'completed' WHERE id = ? AND status <> 'completed'")->execute([$requestId]);
         logActivity($_SESSION['user_id'], 'Engineer received site materials', 'Projects', $request['pr_number']);
-        $_SESSION['success'] = 'Natanggap mo na ang materials sa site. Completed na ang ' . $request['pr_number'] . '.';
+        notify('warehouse', 'request_complete', 'Request complete', $request['pr_number'] . ' has been received by Engineering and is Complete.', 'modules/warehouse/material_requests.php', null, 'purchase_request', $requestId);
+        notify('procurement', 'request_complete', 'Request complete', $request['pr_number'] . ' has been received by Engineering and is Complete.', 'modules/procurement/purchase_requests.php', null, 'purchase_request', $requestId);
+        notify('admin', 'request_complete', 'Request complete', $request['pr_number'] . ' has been received by Engineering and is Complete.', 'modules/admin/project_monitoring.php', null, 'purchase_request', $requestId);
+        $_SESSION['success'] = 'You have received the materials on site. ' . $request['pr_number'] . ' is complete.';
     } catch (Throwable $e) {
         $_SESSION['error'] = $e instanceof PDOException ? userDatabaseError($e, 'Projects') : $e->getMessage();
     }
@@ -106,7 +109,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['request_materials']))
             $lines[] = ['name' => $customName, 'qty' => $customQty, 'unit' => $customUnit, 'cost' => 0];
         }
         if (!$lines) {
-            throw new RuntimeException('Pumili ng kahit isang material, tapos pindutin ang Send to Procurement.');
+            throw new RuntimeException('Select at least one material, then click Send to Procurement.');
         }
         $pdo->beginTransaction();
         $prNumber = generateNumber('PR', 'purchase_requests', 'pr_number');
@@ -126,7 +129,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['request_materials']))
         $pdo->prepare("UPDATE projects SET engineering_received_at = COALESCE(engineering_received_at, NOW()) WHERE id = ?")->execute([$projectId]);
         $pdo->commit();
         logActivity($_SESSION['user_id'], 'Requested materials', 'Projects', $prNumber . ' for ' . $project['project_code']);
-        $_SESSION['success'] = 'Naipadala kay Procurement ang ' . $prNumber . '. Bibilhin nila ito, gagawa ng order, at ipapadala sa Warehouse.';
+        notify('procurement', 'material_request', 'Material request', $prNumber . ' has been sent to Procurement. They will buy the items, create the order and send it to the Warehouse.', 'modules/procurement/purchase_requests.php', $projectId, 'purchase_request', $requestId);
+        $_SESSION['success'] = $prNumber . ' has been sent to Procurement. They will buy the items, create the order and send it to the Warehouse.';
     } catch (Throwable $e) {
         if ($pdo->inTransaction()) {
             $pdo->rollBack();
@@ -226,9 +230,9 @@ foreach ($engineer_requests as $request) {
 <?php endif; ?>
 
 <?php if ($requestView): ?>
-<p style="color:#64748b;">Piliin ang project at ang materials, tapos pindutin ang Send to Procurement. Kapag na-order na, natanggap ng Warehouse, at na-release sa site, lalabas ang update dito. Pindutin ang Completed.</p>
+<p style="color:#64748b;">Select the project and the materials, then click Send to Procurement. Once the items are ordered, received by the Warehouse and released to the site, the update will appear here. Click Completed to confirm.</p>
 <?php if ($awaitingComplete > 0): ?>
-    <div class="alert alert-success">Na-release na ng Warehouse ang materials sa site. Pindutin ang Completed sa request.</div>
+    <div class="alert alert-success">The Warehouse has released the materials to the site. Click Completed on the request.</div>
 <?php endif; ?>
 <div class="card">
     <h3>Send to Procurement</h3>
@@ -245,13 +249,13 @@ foreach ($engineer_requests as $request) {
         </div>
     </form>
     <?php if ($selected): ?>
-        <p style="color:#64748b;margin:0.75rem 0 0;">Naka-check na ang materials ng project. Alisin ang check sa hindi isasama. Ang Send to Procurement ay nasa ilalim ng listahan.</p>
+        <p style="color:#64748b;margin:0.75rem 0 0;">The project's materials are already checked. Uncheck any item you do not want to include. The Send to Procurement button is below the list.</p>
     <?php elseif (!$selected): ?>
-        <p style="color:#64748b;margin:0.75rem 0 0;">Pumili ng project para lumabas ang materials at maipadala kay Procurement.</p>
+        <p style="color:#64748b;margin:0.75rem 0 0;">Choose a project to load its materials and send them to Procurement.</p>
     <?php endif; ?>
 </div>
 <?php else: ?>
-<p style="color:#64748b;">Tanggapin ang project, tapos magpadala ng material request kay Procurement.</p>
+<p style="color:#64748b;">Receive the project, then send a material request to Procurement.</p>
 <?php endif; ?>
 
 <?php if ($requestView): ?>
@@ -264,7 +268,7 @@ foreach ($engineer_requests as $request) {
             </thead>
             <tbody>
                 <?php if (!$engineer_requests): ?>
-                    <tr><td colspan="6">Wala pang material request.</td></tr>
+                    <tr><td colspan="6">No material requests yet.</td></tr>
                 <?php endif; ?>
                 <?php foreach ($engineer_requests as $request): ?>
                     <?php
@@ -272,15 +276,11 @@ foreach ($engineer_requests as $request) {
                     if ($request['status'] === 'completed') {
                         $requestLabel = 'Completed';
                     } elseif ($ready) {
-                        $requestLabel = 'Released to your site';
+                        $requestLabel = 'Released';
                     } elseif ($request['status'] === 'received') {
-                        $requestLabel = 'Received by warehouse';
-                    } elseif ($request['status'] === 'ordered') {
-                        $requestLabel = 'Ordered by Procurement';
-                    } elseif ($request['status'] === 'confirmed') {
-                        $requestLabel = 'Supplier accepted';
-                    } elseif ($request['status'] === 'approved') {
-                        $requestLabel = 'With Procurement';
+                        $requestLabel = 'Received by Warehouse';
+                    } elseif (in_array($request['status'], ['ordered', 'confirmed', 'approved'], true)) {
+                        $requestLabel = 'Ordered';
                     } elseif ($request['status'] === 'pending') {
                         $requestLabel = 'Sent to Procurement';
                     } else {
@@ -295,7 +295,7 @@ foreach ($engineer_requests as $request) {
                     <td><span class="badge badge-<?php echo $request['status'] === 'completed' ? 'success' : htmlspecialchars($request['status']); ?>"><?php echo htmlspecialchars($requestLabel); ?></span></td>
                     <td>
                         <?php if ($ready && $request['status'] !== 'completed' && canWriteDepartmentData('projects')): ?>
-                            <form method="POST" style="display:inline;" onsubmit="return confirm('Natanggap mo na ba ang materials sa site? Magiging completed ang request.');">
+                            <form method="POST" style="display:inline;" onsubmit="return confirm('Confirm that you received the materials on site? The request will be marked Completed.');">
                                 <?php if ($requestView): ?><input type="hidden" name="requests" value="1"><?php endif; ?>
                                 <input type="hidden" name="receive_site_materials" value="1">
                                 <input type="hidden" name="purchase_request_id" value="<?php echo (int) $request['id']; ?>">

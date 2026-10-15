@@ -22,7 +22,8 @@ try {
     // Project Statistics
     $stats['active_projects'] = $pdo->query("SELECT COUNT(*) FROM projects WHERE status IN ('planning', 'ongoing')")->fetchColumn() ?? 0;
     $stats['total_project_amount'] = $pdo->query("SELECT COALESCE(SUM(estimated_budget), 0) FROM projects")->fetchColumn() ?? 0;
-    $stats['total_project_expenses'] = $pdo->query("SELECT COALESCE(SUM(amount), 0) FROM expenses WHERE status IN ('pending', 'paid')")->fetchColumn() ?? 0;
+    $stats['total_project_expenses'] = $pdo->query("SELECT COALESCE(SUM(actual_cost), 0) FROM v_project_costs")->fetchColumn() ?? 0;
+    $stats['pending_cost'] = $pdo->query("SELECT COALESCE(SUM(pending_cost), 0) FROM v_project_costs")->fetchColumn() ?? 0;
     
     // Financial Statistics - with table existence check
     try {
@@ -237,8 +238,9 @@ include '../../includes/header.php';
         <div class="stat-amount">₱<?php echo number_format((float) ($stats['total_project_amount'] ?? 0), 2); ?></div>
     </div>
     <div class="card" style="border-left-color:#e74a3b;margin:0;">
-        <div style="font-size:0.75rem;color:#64748b;">Total Project Expenses</div>
+        <div style="font-size:0.75rem;color:#64748b;">Actual Cost</div>
         <div class="stat-amount">₱<?php echo number_format((float) ($stats['total_project_expenses'] ?? 0), 2); ?></div>
+        <div style="font-size:0.75rem;color:#64748b;">Pending/Committed ₱<?php echo number_format((float) ($stats['pending_cost'] ?? 0), 2); ?></div>
     </div>
     <div class="card" style="border-left-color:#1cc88a;margin:0;">
         <div style="font-size:0.75rem;color:#64748b;">Available Funds</div>

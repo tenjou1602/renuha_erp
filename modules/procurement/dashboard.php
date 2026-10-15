@@ -50,7 +50,7 @@ include '../../includes/header.php';
         <div>
             <p class="dept-kicker">Procurement Department</p>
             <h1><i class="fas fa-shopping-cart"></i> Procurement Dashboard</h1>
-            <p class="dept-sub">1) Tanggapin ang material request. 2) Pumili ng supplier. 3) Gumawa ng purchase order. 4) Ipadala sa warehouse.</p>
+            <p class="dept-sub">1) Receive the material request. 2) Choose a supplier. 3) Create the purchase order. 4) Send it to the Warehouse.</p>
         </div>
         <?php if (canWriteDepartmentData('procurement')): ?>
         <div class="dept-actions">

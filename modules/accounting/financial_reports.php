@@ -71,23 +71,6 @@ try {
             ")->fetchColumn() ?? 0);
             $report_data['purchase_costs'] = $purchaseFromOrders;
             $report_data['purchase_source'] = 'purchases';
-            $recordedMaterialPurchases = (float) ($pdo->query("
-                SELECT COALESCE(SUM(amount), 0)
-                FROM expenses
-                WHERE status IN ('pending', 'paid')
-                  AND category = 'Materials'
-                  AND reference_number LIKE 'PO-%'
-                  AND COALESCE(expense_date, DATE(created_at)) BETWEEN '$start_date' AND '$end_date'
-            ")->fetchColumn() ?? 0);
-            if ($report_data['purchase_costs'] <= 0 && $recordedMaterialPurchases <= 0) {
-                $report_data['purchase_costs'] = (float) ($pdo->query("
-                    SELECT COALESCE(SUM(material_cost), 0)
-                    FROM projects
-                    WHERE material_cost > 0
-                      AND DATE(created_at) BETWEEN '$start_date' AND '$end_date'
-                ")->fetchColumn() ?? 0);
-                $report_data['purchase_source'] = 'quotation';
-            }
             $report_data['net_profit'] = $report_data['total_revenue'] - $report_data['total_expenses'] - $report_data['purchase_costs'];
 
             $report_data['expense_breakdown'] = $pdo->query("
@@ -158,26 +141,15 @@ try {
                 WHERE b.status = 'active'
                 GROUP BY sort_month, month
             ")->fetchAll(), 'expenses');
-            if ($report_data['purchase_source'] === 'quotation') {
-                $addTrend($pdo->query("
-                    SELECT DATE_FORMAT(created_at, '%Y-%m') AS sort_month,
-                           DATE_FORMAT(created_at, '%b %Y') AS month,
-                           COALESCE(SUM(material_cost), 0) AS total
-                    FROM projects
-                    WHERE material_cost > 0
-                    GROUP BY sort_month, month
-                ")->fetchAll(), 'purchases');
-            } else {
-                $addTrend($pdo->query("
-                    SELECT DATE_FORMAT(COALESCE(po.order_date, po.created_at), '%Y-%m') AS sort_month,
-                           DATE_FORMAT(COALESCE(po.order_date, po.created_at), '%b %Y') AS month,
-                           COALESCE(SUM(GREATEST(poi.quantity - poi.received_quantity, 0) * poi.unit_price), 0) AS total
-                    FROM purchase_order_items poi
-                    INNER JOIN purchase_orders po ON po.id = poi.purchase_order_id
-                    WHERE po.status NOT IN ('draft', 'cancelled')
-                    GROUP BY sort_month, month
-                ")->fetchAll(), 'purchases');
-            }
+            $addTrend($pdo->query("
+                SELECT DATE_FORMAT(COALESCE(po.order_date, po.created_at), '%Y-%m') AS sort_month,
+                       DATE_FORMAT(COALESCE(po.order_date, po.created_at), '%b %Y') AS month,
+                       COALESCE(SUM(GREATEST(poi.quantity - poi.received_quantity, 0) * poi.unit_price), 0) AS total
+                FROM purchase_order_items poi
+                INNER JOIN purchase_orders po ON po.id = poi.purchase_order_id
+                WHERE po.status NOT IN ('draft', 'cancelled')
+                GROUP BY sort_month, month
+            ")->fetchAll(), 'purchases');
             ksort($trend);
             $report_data['monthly_trend'] = array_values($trend);
             break;
@@ -190,8 +162,8 @@ try {
                     p.project_code,
                     p.name,
                     p.estimated_budget,
-                    p.actual_cost,
-                    (p.estimated_budget - p.actual_cost) as remaining_budget,
+                    vpc.actual_cost,
+                    vpc.budget_variance as remaining_budget,
                     p.status,
                     COUNT(DISTINCT inv.id) as invoice_count,
                     COALESCE(SUM(CASE WHEN inv.status = 'paid' THEN inv.amount ELSE 0 END), 0) as paid_invoices,
@@ -200,9 +172,10 @@ try {
                     COALESCE(SUM(CASE WHEN exp.status = 'paid' THEN exp.amount ELSE 0 END), 0) as paid_expenses,
                     COALESCE(SUM(exp.amount), 0) as total_expenses
                 FROM projects p
+                LEFT JOIN v_project_costs vpc ON vpc.project_id = p.id
                 LEFT JOIN invoices inv ON p.id = inv.project_id
                 LEFT JOIN expenses exp ON p.id = exp.project_id
-                GROUP BY p.id, p.project_code, p.name, p.estimated_budget, p.actual_cost, p.status
+                GROUP BY p.id, p.project_code, p.name, p.estimated_budget, vpc.actual_cost, vpc.budget_variance, p.status
                 ORDER BY p.created_at DESC
             ")->fetchAll();
             
@@ -212,9 +185,10 @@ try {
                     p.project_code,
                     p.name,
                     p.estimated_budget,
-                    p.actual_cost,
-                    (p.actual_cost / GREATEST(p.estimated_budget, 1)) * 100 as utilization_percentage
+                    vpc.actual_cost,
+                    (vpc.actual_cost / GREATEST(p.estimated_budget, 1)) * 100 as utilization_percentage
                 FROM projects p
+                LEFT JOIN v_project_costs vpc ON vpc.project_id = p.id
                 WHERE p.estimated_budget > 0
                 ORDER BY utilization_percentage DESC
                 LIMIT 10
@@ -444,7 +418,7 @@ include '../../includes/header.php';
     <div class="stat-card" style="border-left-color:#36b9cc;">
         <div class="value">₱<?php echo number_format($report_data['purchase_costs'] ?? 0, 2); ?></div>
         <div class="label"><a href="purchase_costs.php">Purchase Costs</a></div>
-        <div class="hint"><?php echo ($report_data['purchase_source'] ?? '') === 'quotation' ? 'Quotation material cost. Wala pang purchase.' : 'From approved purchases.'; ?></div>
+        <div class="hint"><?php echo ($report_data['purchase_source'] ?? '') === 'quotation' ? 'Quotation material cost. No purchase yet.' : 'From approved purchases.'; ?></div>
     </div>
     <div class="stat-card" style="border-left-color:#1cc88a;">
         <div class="value <?php echo ($report_data['net_profit'] ?? 0) >= 0 ? 'profit-positive' : 'profit-negative'; ?>">₱<?php echo number_format($report_data['net_profit'] ?? 0, 2); ?></div>

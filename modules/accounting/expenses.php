@@ -30,6 +30,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $reference_number = trim($_POST['reference_number'] ?? '');
         
         $errors = [];
+        if ($project_id <= 0) $errors[] = 'Project is required.';
         if (empty($category)) $errors[] = 'Category is required.';
         if ($amount <= 0) $errors[] = 'Amount must be greater than 0.';
         

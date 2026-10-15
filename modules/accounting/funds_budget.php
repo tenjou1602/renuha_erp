@@ -127,6 +127,7 @@ try {
 // Get funds
 syncPurchasedMaterialsToAccounting($pdo);
 $funds = [];
+$costMap = [];
 try {
     $query = "
         SELECT f.*, p.project_code, p.name as project_name, u.full_name as created_by_name
@@ -136,12 +137,21 @@ try {
         ORDER BY f.created_at DESC
     ";
     $funds = $pdo->query($query)->fetchAll();
+    $costMap = [];
+    foreach ($pdo->query("SELECT project_id, actual_cost FROM v_project_costs") as $costRow) {
+        $costMap[(int) $costRow['project_id']] = (float) $costRow['actual_cost'];
+    }
+    foreach ($funds as &$fundRow) {
+        $linkedId = (int) ($fundRow['project_id'] ?? 0);
+        $fundRow['allocated_amount'] = $linkedId > 0 ? ($costMap[$linkedId] ?? 0) : 0;
+    }
+    unset($fundRow);
 } catch (PDOException $e) {
     $error = userDatabaseError($e);
 }
 
 // Get projects for dropdown
-$projects = $pdo->query("SELECT id, project_code, name, estimated_budget, material_cost, labor_cost FROM projects WHERE status != 'completed' ORDER BY name")->fetchAll();
+$projects = $pdo->query("SELECT id, project_code, name, estimated_budget FROM projects WHERE status != 'completed' ORDER BY name")->fetchAll();
 $prefill_project = (int) ($_GET['project'] ?? 0);
 
 // Get single fund for edit/view
@@ -156,6 +166,10 @@ if ($action === 'edit' || $action === 'view') {
     ");
     $stmt->execute([$id]);
     $fund_details = $stmt->fetch();
+    if ($fund_details) {
+        $linkedId = (int) ($fund_details['project_id'] ?? 0);
+        $fund_details['allocated_amount'] = $linkedId > 0 ? ($costMap[$linkedId] ?? 0) : 0;
+    }
     
     if (!$fund_details) {
         header('Location: funds_budget.php');
@@ -238,7 +252,7 @@ include '../../includes/header.php';
         <div class="stat-amount">₱<?php echo number_format(array_sum(array_column($funds, 'amount')), 2); ?></div>
     </div>
     <div class="card" style="border-left-color:#f6c23e;margin:0;">
-        <div style="font-size:0.75rem;color:#64748b;">Allocated (labor + materials)</div>
+        <div style="font-size:0.75rem;color:#64748b;">Allocated (actual cost)</div>
         <div class="stat-amount">₱<?php echo number_format(array_sum(array_column($funds, 'allocated_amount')), 2); ?></div>
     </div>
     <div class="card" style="border-left-color:#1cc88a;margin:0;">
@@ -255,36 +269,65 @@ include '../../includes/header.php';
         </div>
     </div>
 </div>
-<p style="color:#64748b;margin-top:-0.5rem;">Ang allocated ay planned wages plus ang materials na nabili at natanggap na, sa presyo ng supplier. Available Funds = quotation total minus iyon.</p>
+<p style="color:#64748b;margin-top:-0.5rem;">Allocated is the actual cost of the linked project (expenses plus qualifying purchase orders). Available funds equal the fund amount minus that actual cost.</p>
 
 <?php if ($action === 'list'): ?>
+<?php
+    $fundsTotal = (float) array_sum(array_column($funds, 'amount'));
+    $fundsAllocated = (float) array_sum(array_column($funds, 'allocated_amount'));
+    $fundsAvailable = $fundsTotal - $fundsAllocated;
+?>
 <div class="card">
     <h3><i class="fas fa-chart-pie"></i> Funds Monitoring</h3>
-    <canvas id="fundsChart" height="90"></canvas>
+    <?php if ($fundsTotal <= 0): ?>
+        <p style="color:#64748b;">No funds have been recorded yet.</p>
+    <?php else: ?>
+    <div class="funds-layout">
+        <div class="funds-chart-box">
+            <canvas id="fundsChart"></canvas>
+            <div class="funds-center">₱<?php echo number_format($fundsTotal, 0); ?></div>
+        </div>
+        <div class="funds-legend">
+            <?php if ($fundsAllocated <= 0): ?>
+                <p><strong>No funds allocated yet</strong></p>
+            <?php endif; ?>
+            <p>Available: <strong>₱<?php echo number_format($fundsAvailable, 2); ?></strong>
+                (<?php echo $fundsTotal > 0 ? number_format(($fundsAvailable / $fundsTotal) * 100, 1) : '0.0'; ?>%)</p>
+            <p>Allocated: <strong>₱<?php echo number_format($fundsAllocated, 2); ?></strong>
+                (<?php echo $fundsTotal > 0 ? number_format(($fundsAllocated / $fundsTotal) * 100, 1) : '0.0'; ?>%)</p>
+        </div>
+    </div>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+    <script>
+    new Chart(document.getElementById('fundsChart'), {
+        type: 'doughnut',
+        data: {
+            labels: ['Available', 'Allocated'],
+            datasets: [{
+                data: [
+                    <?php echo json_encode(max(0, $fundsAvailable)); ?>,
+                    <?php echo json_encode(max(0, $fundsAllocated)); ?>
+                ],
+                backgroundColor: ['#1cc88a', '#f6c23e']
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            cutout: '68%',
+            plugins: { legend: { display: false } }
+        }
+    });
+    </script>
+    <?php endif; ?>
 </div>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
-<script>
-new Chart(document.getElementById('fundsChart'), {
-    type: 'doughnut',
-    data: {
-        labels: ['Available', 'Allocated'],
-        datasets: [{
-            data: [
-                <?php echo json_encode(max(0, array_sum(array_column($funds, 'amount')) - array_sum(array_column($funds, 'allocated_amount')))); ?>,
-                <?php echo json_encode((float) array_sum(array_column($funds, 'allocated_amount'))); ?>
-            ],
-            backgroundColor: ['#1cc88a', '#f6c23e']
-        }]
-    }
-});
-</script>
 <?php endif; ?>
 
 <?php if ($action === 'add' || $action === 'edit'): ?>
 <!-- Add/Edit Form -->
 <div class="card">
     <h3><?php echo $action === 'add' ? 'Create New' : 'Edit'; ?> Fund</h3>
-    <p style="color:#64748b;margin-top:0;">Ito ang pondo ng project mula sa quotation. Ang Amount ang limit ng client. Ang Allocated Amount ay galing sa planned wages ng Labor/Salary Budget. Kapag lumampas, kailangan ng additional payment sa client.</p>
+    <p style="color:#64748b;margin-top:0;">This is the project fund from the quotation. Amount is the client limit. Allocated amount is the project's actual cost. If it exceeds the fund, the client needs an additional payment.</p>
     <form method="POST">
         <?php if ($action === 'edit'): ?>
             <input type="hidden" name="update_fund" value="1">
@@ -295,8 +338,8 @@ new Chart(document.getElementById('fundsChart'), {
         <div class="form-row">
             <div class="form-group">
                 <label class="required">Fund Name</label>
-                <input type="text" name="fund_name" required value="<?php echo htmlspecialchars($fund_details['fund_name'] ?? ($linked_project ? ($linked_project['project_code'] . ' — ' . $linked_project['name']) : '')); ?>" placeholder="Hal. PRJ-2026-008 — Fire Protection System">
-                <small>Pangalan ng pondo. Kapag may napiling project, kusang galing ito sa project. Puwede mong baguhin.</small>
+                <input type="text" name="fund_name" required value="<?php echo htmlspecialchars($fund_details['fund_name'] ?? ($linked_project ? ($linked_project['project_code'] . ' — ' . $linked_project['name']) : '')); ?>" placeholder="e.g. PRJ-2026-008 — Fire Protection System">
+                <small>Fund name. When a project is selected, this is filled from the project. You can change it.</small>
             </div>
             <div class="form-group">
                 <label>Fund Type</label>
@@ -314,7 +357,7 @@ new Chart(document.getElementById('fundsChart'), {
                 <label class="required">Amount (₱)</label>
                 <?php $fundAmount = $fund_details['amount'] ?? ($linked_project['estimated_budget'] ?? 0); ?>
                 <input type="number" step="0.01" name="amount" id="fundAmount" required value="<?php echo htmlspecialchars($fundAmount); ?>" min="0" <?php echo $linked_project && (float) $linked_project['estimated_budget'] > 0 ? 'readonly' : ''; ?> style="<?php echo $linked_project && (float) $linked_project['estimated_budget'] > 0 ? 'background:#eff6ff;font-weight:700;color:#1d4ed8;' : ''; ?>">
-                <small id="fundAmountNote">Kapag may project, ito ang total ng quotation. Hindi ito binabago nang mano-mano.</small>
+                <small id="fundAmountNote">When a project is selected, this is the quotation total. It is not typed in by hand.</small>
             </div>
             <div class="form-group">
                 <label>Project (Optional)</label>
@@ -323,8 +366,6 @@ new Chart(document.getElementById('fundsChart'), {
                     <?php foreach ($projects as $project): ?>
                         <option value="<?php echo $project['id']; ?>"
                             data-amount="<?php echo htmlspecialchars($project['estimated_budget'] ?? 0); ?>"
-                            data-material="<?php echo htmlspecialchars($project['material_cost'] ?? 0); ?>"
-                            data-labor="<?php echo htmlspecialchars($project['labor_cost'] ?? 0); ?>"
                             <?php echo (int) ($fund_details['project_id'] ?? $prefill_project) === (int) $project['id'] ? 'selected' : ''; ?>>
                             <?php echo htmlspecialchars($project['project_code'] . ' - ' . $project['name']); ?>
                         </option>
@@ -336,7 +377,7 @@ new Chart(document.getElementById('fundsChart'), {
         
         <div class="form-group">
             <label>Description</label>
-            <textarea name="description" rows="3" placeholder="Fund description"><?php echo htmlspecialchars($fund_details['description'] ?? ($linked_project ? ('Quotation total for this project. Material ₱' . number_format((float) $linked_project['material_cost'], 2) . '. Labor ₱' . number_format((float) $linked_project['labor_cost'], 2) . '.') : '')); ?></textarea>
+            <textarea name="description" rows="3" placeholder="Fund description"><?php echo htmlspecialchars($fund_details['description'] ?? ($linked_project ? ('Estimated budget for this project: ₱' . number_format((float) $linked_project['estimated_budget'], 2) . '.') : '')); ?></textarea>
         </div>
         
         <div class="form-row">
@@ -365,10 +406,10 @@ new Chart(document.getElementById('fundsChart'), {
         <div class="detail-row"><span>Fund Name:</span> <strong><?php echo htmlspecialchars($fund_details['fund_name']); ?></strong></div>
         <div class="detail-row"><span>Fund Type:</span> <?php echo ucfirst($fund_details['fund_type']); ?></div>
         <div class="detail-row"><span>Total Amount:</span> <strong>₱<?php echo number_format($fund_details['amount'], 2); ?></strong></div>
-        <div class="detail-row"><span>Allocated (labor + materials):</span> <strong class="fund-allocated">₱<?php echo number_format($fund_details['allocated_amount'], 2); ?></strong></div>
+        <div class="detail-row"><span>Allocated (actual cost):</span> <strong class="fund-allocated">₱<?php echo number_format($fund_details['allocated_amount'], 2); ?></strong></div>
         <div class="detail-row"><span>Available:</span> <strong class="<?php echo ($fund_details['amount'] - $fund_details['allocated_amount']) < 0 ? 'budget-over' : 'fund-available'; ?>">₱<?php echo number_format($fund_details['amount'] - $fund_details['allocated_amount'], 2); ?></strong></div>
         <?php if (($fund_details['amount'] - $fund_details['allocated_amount']) < 0): ?>
-        <div class="alert alert-danger">Ang labor at purchased materials ay lampas sa fund ng ₱<?php echo number_format($fund_details['allocated_amount'] - $fund_details['amount'], 2); ?>. Kailangan ng additional payment sa client.</div>
+        <div class="alert alert-danger">Actual cost is over the fund by ₱<?php echo number_format($fund_details['allocated_amount'] - $fund_details['amount'], 2); ?>. The client needs an additional payment.</div>
         <?php endif; ?>
         <?php if ($fund_labor): ?>
         <div class="table-responsive" style="margin-top:1rem;">
@@ -387,7 +428,7 @@ new Chart(document.getElementById('fundsChart'), {
             </table>
         </div>
         <?php elseif (!empty($fund_details['project_id'])): ?>
-        <p><a href="labor_budget.php?action=add&project=<?php echo (int) $fund_details['project_id']; ?>">Gumawa ng Labor / Salary Budget</a> para mailagay ang pasahod sa fund na ito.</p>
+        <p><a href="labor_budget.php?action=add&project=<?php echo (int) $fund_details['project_id']; ?>">Create a Labor / Salary Budget</a> to record wages against this fund.</p>
         <?php endif; ?>
         <div class="detail-row"><span>Project:</span> <?php echo htmlspecialchars($fund_details['project_name'] ?? 'N/A'); ?></div>
         <div class="detail-row"><span>Description:</span> <?php echo nl2br(htmlspecialchars($fund_details['description'] ?? '')); ?></div>
@@ -507,12 +548,10 @@ document.getElementById('fundProject')?.addEventListener('change', function () {
         amount.style.background = '';
         amount.style.fontWeight = '';
         amount.style.color = '';
-        if (note) note.textContent = 'Walang project, kaya puwedeng i-type ang amount para sa general, reserve, o emergency fund.';
+        if (note) note.textContent = 'No project is selected, so you can type the amount for a general, reserve, or emergency fund.';
         return;
     }
     const total = Number(option.dataset.amount || 0);
-    const material = Number(option.dataset.material || 0);
-    const labor = Number(option.dataset.labor || 0);
     const money = (value) => '₱' + value.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
     if (!this.form.elements.fund_name.value) {
         this.form.elements.fund_name.value = option.textContent.trim();
@@ -527,7 +566,7 @@ document.getElementById('fundProject')?.addEventListener('change', function () {
         amount.style.fontWeight = '700';
         amount.style.color = '#1d4ed8';
     }
-    this.form.elements.description.value = 'Quotation total for this project. Material ' + money(material) + '. Labor ' + money(labor) + '.';
-    if (note) note.textContent = 'Quotation total ' + money(total) + '. Material ' + money(material) + '. Labor ' + money(labor) + '. Ito ang limit ng client.';
+    this.form.elements.description.value = 'Estimated budget for this project: ' + money(total) + '.';
+    if (note) note.textContent = 'Estimated budget ' + money(total) + '. This is the project limit from projects.estimated_budget.';
 });
 </script>

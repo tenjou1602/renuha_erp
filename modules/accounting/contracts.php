@@ -123,7 +123,7 @@ try {
 }
 
 // Get projects for dropdown
-$projects = $pdo->query("SELECT id, project_code, name, client, subject, estimated_budget, material_cost, labor_cost, start_date, end_date FROM projects WHERE status != 'completed' ORDER BY name")->fetchAll();
+$projects = $pdo->query("SELECT id, project_code, name, client, subject, estimated_budget, start_date, end_date FROM projects WHERE status != 'completed' ORDER BY name")->fetchAll();
 $prefill_project = (int) ($_GET['project'] ?? 0);
 $from_project = null;
 foreach ($projects as $project) {
@@ -278,8 +278,6 @@ new Chart(document.getElementById('contractChart'), {
                             data-client="<?php echo htmlspecialchars($project['client'] ?? ''); ?>"
                             data-name="<?php echo htmlspecialchars($project['name'] ?? ''); ?>"
                             data-amount="<?php echo htmlspecialchars($project['estimated_budget'] ?? 0); ?>"
-                            data-material="<?php echo htmlspecialchars($project['material_cost'] ?? 0); ?>"
-                            data-labor="<?php echo htmlspecialchars($project['labor_cost'] ?? 0); ?>"
                             data-start="<?php echo htmlspecialchars($project['start_date'] ?? ''); ?>"
                             data-end="<?php echo htmlspecialchars($project['end_date'] ?? ''); ?>"
                             <?php echo (int) ($contract_details['project_id'] ?? $prefill_project) === (int) $project['id'] ? 'selected' : ''; ?>>
@@ -325,7 +323,7 @@ new Chart(document.getElementById('contractChart'), {
         
         <div class="form-group">
             <label>Description</label>
-            <textarea name="description" rows="3" placeholder="Contract description"><?php echo htmlspecialchars($contract_details['description'] ?? ($from_project ? ('From quotation. Material cost ₱' . number_format((float) $from_project['material_cost'], 2) . '. Labor cost ₱' . number_format((float) $from_project['labor_cost'], 2) . '.') : '')); ?></textarea>
+            <textarea name="description" rows="3" placeholder="Contract description"><?php echo htmlspecialchars($contract_details['description'] ?? ($from_project ? ('From project estimated budget ₱' . number_format((float) $from_project['estimated_budget'], 2) . '.') : '')); ?></textarea>
         </div>
         
         <div style="margin-top:1.5rem;">
@@ -467,7 +465,7 @@ document.getElementById('contractProject')?.addEventListener('change', function 
     const form = this.form;
     const note = document.getElementById('contractSplit');
     if (!option || !option.value) {
-        if (note) note.textContent = 'Choosing a received project fills the contract amount from the quotation total, and shows its material and labor cost.';
+        if (note) note.textContent = 'Choosing a project fills the contract amount from its estimated budget.';
         return;
     }
     if (option.dataset.name && !form.elements.contract_name.value) form.elements.contract_name.value = option.dataset.name;
@@ -475,9 +473,7 @@ document.getElementById('contractProject')?.addEventListener('change', function 
     if (option.dataset.amount) form.elements.contract_value.value = option.dataset.amount;
     if (option.dataset.start) form.elements.start_date.value = option.dataset.start;
     if (option.dataset.end) form.elements.end_date.value = option.dataset.end;
-    const material = Number(option.dataset.material || 0);
-    const labor = Number(option.dataset.labor || 0);
-    form.elements.description.value = 'From quotation. Material cost ₱' + material.toLocaleString(undefined, {minimumFractionDigits: 2}) + '. Labor cost ₱' + labor.toLocaleString(undefined, {minimumFractionDigits: 2}) + '.';
-    if (note) note.textContent = 'Quotation total ₱' + Number(option.dataset.amount || 0).toLocaleString(undefined, {minimumFractionDigits: 2}) + ' · Material ₱' + material.toLocaleString(undefined, {minimumFractionDigits: 2}) + ' · Labor ₱' + labor.toLocaleString(undefined, {minimumFractionDigits: 2});
+    form.elements.description.value = 'From project estimated budget ₱' + Number(option.dataset.amount || 0).toLocaleString(undefined, {minimumFractionDigits: 2}) + '.';
+    if (note) note.textContent = 'Estimated budget ₱' + Number(option.dataset.amount || 0).toLocaleString(undefined, {minimumFractionDigits: 2});
 });
 </script>

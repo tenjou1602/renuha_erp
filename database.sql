@@ -44,9 +44,6 @@ CREATE TABLE IF NOT EXISTS `projects` (
   `end_date` DATE NULL,
   `status` ENUM('draft','quotation','approved','accounting_setup','assigned','planning','material_request','procurement','material_available','implementation','ongoing','completed','on_hold') NOT NULL DEFAULT 'approved',
   `estimated_budget` DECIMAL(15,2) NOT NULL DEFAULT 0.00,
-  `material_cost` DECIMAL(15,2) NOT NULL DEFAULT 0.00,
-  `labor_cost` DECIMAL(15,2) NOT NULL DEFAULT 0.00,
-  `actual_cost` DECIMAL(15,2) NOT NULL DEFAULT 0.00,
   `created_by` BIGINT UNSIGNED NULL,
   `assigned_to` BIGINT UNSIGNED NULL,
   `in_charge_id` BIGINT UNSIGNED NULL,
@@ -56,6 +53,7 @@ CREATE TABLE IF NOT EXISTS `projects` (
   `quotation_name` VARCHAR(255) NULL,
   `subject` TEXT NULL,
   `accounting_received_at` DATETIME NULL,
+  `accounting_status` ENUM('pending','received','quoted','rejected') NOT NULL DEFAULT 'pending',
   `engineering_received_at` DATETIME NULL,
   `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` TIMESTAMP NULL DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
@@ -421,6 +419,7 @@ CREATE TABLE IF NOT EXISTS `material_requests` (
   `quantity` INT UNSIGNED NOT NULL,
   `request_date` DATE NOT NULL,
   `status` ENUM('pending','approved','rejected','partial') NOT NULL DEFAULT 'pending',
+  `flow_status` ENUM('procurement','accounting','warehouse','released','complete') NOT NULL DEFAULT 'procurement',
   `requested_by` BIGINT UNSIGNED NOT NULL,
   `notes` TEXT NULL,
   `released_quantity` INT UNSIGNED NOT NULL DEFAULT 0,
@@ -437,6 +436,22 @@ CREATE TABLE IF NOT EXISTS `material_requests` (
   CONSTRAINT `fk_mr_material` FOREIGN KEY (`material_id`) REFERENCES `materials` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE,
   CONSTRAINT `fk_mr_requested_by` FOREIGN KEY (`requested_by`) REFERENCES `users` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE,
   CONSTRAINT `fk_mr_released_by` FOREIGN KEY (`released_by`) REFERENCES `users` (`id`) ON DELETE SET NULL ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `warehouse_releases` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `material_request_id` BIGINT UNSIGNED NOT NULL,
+  `project_id` BIGINT UNSIGNED NOT NULL,
+  `engineer_id` BIGINT UNSIGNED NOT NULL,
+  `quantity` INT UNSIGNED NOT NULL,
+  `status` ENUM('released','received') NOT NULL DEFAULT 'released',
+  `released_by` BIGINT UNSIGNED NULL,
+  `received_at` DATETIME NULL,
+  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_wr_request` (`material_request_id`),
+  KEY `idx_wr_project` (`project_id`),
+  KEY `idx_wr_engineer` (`engineer_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS `chart_of_accounts` (

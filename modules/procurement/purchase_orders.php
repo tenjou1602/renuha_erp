@@ -35,7 +35,7 @@ function savePurchaseOrderItems(PDO $pdo, int $orderId, int $requestId): float
     foreach ($rows as $item) {
         $unitPrice = $prices[(int) $item['id']] ?? 0;
         if ($unitPrice <= 0) {
-            throw new RuntimeException('Ilagay muna ang unit price ng supplier sa bawat material sa price comparison.');
+            throw new RuntimeException('Enter the supplier unit price for every material in the price comparison first.');
         }
     }
     $pdo->prepare("DELETE FROM purchase_order_items WHERE purchase_order_id = ?")->execute([$orderId]);
@@ -71,9 +71,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         
         $errors = [];
         $acceptedQuote = null;
+        $orderProjectId = null;
         if (!$purchase_request_id) {
             $errors[] = 'Select the purchase request so the order has materials and a total.';
         } else {
+            $projectStmt = $pdo->prepare("SELECT project_id FROM purchase_requests WHERE id = ?");
+            $projectStmt->execute([$purchase_request_id]);
+            $orderProjectId = (int) $projectStmt->fetchColumn();
+            if ($orderProjectId <= 0) {
+                $errors[] = 'The purchase request must be linked to a project before an order can be created.';
+                $orderProjectId = null;
+            }
             $accepted = $pdo->prepare("SELECT supplier, supplier_contact FROM quotations WHERE purchase_request_id = ? AND status = 'accepted' ORDER BY id DESC LIMIT 1");
             $accepted->execute([$purchase_request_id]);
             $acceptedQuote = $accepted->fetch();
@@ -100,10 +108,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             try {
                 $pdo->beginTransaction();
                 if (isset($_POST['add_order'])) {
-                    $stmt = $pdo->prepare("INSERT INTO purchase_orders (po_number, purchase_request_id, supplier, supplier_contact, order_date, delivery_date, payment_terms, status, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
-                    $stmt->execute([$po_number, $purchase_request_id, $supplier, $supplier_contact, $order_date, $delivery_date, $payment_terms, $status, $_SESSION['user_id']]);
+                    $stmt = $pdo->prepare("INSERT INTO purchase_orders (po_number, purchase_request_id, project_id, supplier, supplier_contact, order_date, delivery_date, payment_terms, total_amount, status, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)");
+                    $stmt->execute([$po_number, $purchase_request_id, $orderProjectId, $supplier, $supplier_contact, $order_date, $delivery_date, $payment_terms, $status, $_SESSION['user_id']]);
                     $orderId = (int) $pdo->lastInsertId();
                     $poTotal = savePurchaseOrderItems($pdo, $orderId, $purchase_request_id);
+                    $pdo->prepare("UPDATE purchase_orders SET total_amount = ? WHERE id = ?")->execute([$poTotal, $orderId]);
+                    $pdo->prepare("UPDATE material_requests SET flow_status = 'accounting' WHERE purchase_request_id = ? AND flow_status = 'procurement'")->execute([$purchase_request_id]);
                     if (!in_array($status, ['draft', 'cancelled'], true)) {
                         $pdo->prepare("UPDATE purchase_requests SET status = 'ordered', total_amount = ? WHERE id = ? AND status IN ('approved', 'confirmed', 'ordered')")->execute([$poTotal, $purchase_request_id]);
                     } else {
@@ -113,9 +123,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     logActivity($_SESSION['user_id'], 'Created purchase order', 'Procurement', "PO: $po_number");
                     $_SESSION['success'] = "Purchase order created for ₱" . number_format($poTotal, 2) . " from the purchase request.";
                 } else {
-                    $stmt = $pdo->prepare("UPDATE purchase_orders SET purchase_request_id = ?, supplier = ?, supplier_contact = ?, order_date = ?, delivery_date = ?, payment_terms = ?, status = ? WHERE id = ?");
-                    $stmt->execute([$purchase_request_id, $supplier, $supplier_contact, $order_date, $delivery_date, $payment_terms, $status, $id]);
+                    $stmt = $pdo->prepare("UPDATE purchase_orders SET purchase_request_id = ?, project_id = ?, supplier = ?, supplier_contact = ?, order_date = ?, delivery_date = ?, payment_terms = ?, status = ? WHERE id = ?");
+                    $stmt->execute([$purchase_request_id, $orderProjectId, $supplier, $supplier_contact, $order_date, $delivery_date, $payment_terms, $status, $id]);
                     $poTotal = savePurchaseOrderItems($pdo, $id, $purchase_request_id);
+                    $pdo->prepare("UPDATE purchase_orders SET total_amount = ? WHERE id = ?")->execute([$poTotal, $id]);
                     if (!in_array($status, ['draft', 'cancelled'], true)) {
                         $pdo->prepare("UPDATE purchase_requests SET status = 'ordered', total_amount = ? WHERE id = ? AND status IN ('approved', 'confirmed', 'ordered')")->execute([$poTotal, $purchase_request_id]);
                     }
@@ -131,6 +142,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     }
                 }
                 $pdo->commit();
+                if (isset($_POST['add_order']) && !in_array($status, ['draft', 'cancelled'], true)) {
+                    notify('accounting', 'purchase_order', 'Purchase order', $po_number . ' was created and is waiting for Accounting.', 'modules/accounting/project_financials.php', $orderProjectId, 'purchase_order', (int) $orderId);
+                }
                 header('Location: purchase_orders.php');
                 exit();
             } catch (RuntimeException $e) {
@@ -316,7 +330,7 @@ include '../../includes/header.php';
 <!-- Add/Edit Form -->
 <div class="card">
     <h3><?php echo $action === 'add' ? 'Create New' : 'Edit'; ?> Purchase Order</h3>
-    <p style="color:#64748b;margin-top:0;">Purchase order lang pag may tinanggap nang supplier. Ang materials ay galing sa request, at ang supplier ay ang napili sa price comparison.</p>
+    <p style="color:#64748b;margin-top:0;">A purchase order can be created only after a supplier is accepted. Materials come from the request, and the supplier is the one accepted in the price comparison.</p>
     <form method="POST">
         <?php if ($action === 'edit'): ?>
             <input type="hidden" name="update_order" value="1">
@@ -338,7 +352,7 @@ include '../../includes/header.php';
                 <select name="purchase_request_id" id="poRequest" required>
                     <option value="">Select purchase request</option>
                     <?php if (!$purchase_requests): ?>
-                        <option value="" disabled>Wala pang request na may tinanggap na supplier</option>
+                        <option value="" disabled>No request has an accepted supplier yet</option>
                     <?php endif; ?>
                     <?php foreach ($purchase_requests as $pr): ?>
                         <option value="<?php echo $pr['id']; ?>"
@@ -363,7 +377,7 @@ include '../../includes/header.php';
         <div class="form-row">
             <div class="form-group">
                 <label class="required">Supplier</label>
-                <input type="text" name="supplier" id="supplierName" readonly value="<?php echo htmlspecialchars($prefill_supplier); ?>" placeholder="Mula sa tinanggap na supplier" style="background:#f8fafc;">
+                <input type="text" name="supplier" id="supplierName" readonly value="<?php echo htmlspecialchars($prefill_supplier); ?>" placeholder="From the accepted supplier" style="background:#f8fafc;">
             </div>
             <div class="form-group">
                 <label>Supplier Contact</label>
@@ -371,7 +385,7 @@ include '../../includes/header.php';
             </div>
         </div>
         <?php if ($prefill_pr > 0 && $prefill_supplier === ''): ?>
-            <p style="color:#b45309;">Wala pang tinanggap na supplier sa price comparison para sa request na ito. I-accept muna ang supplier doon bago ma-save ang order.</p>
+            <p style="color:#b45309;">No supplier has been accepted in the price comparison for this request. Accept a supplier there before saving the order.</p>
         <?php endif; ?>
         
         <div class="form-row">
@@ -402,7 +416,7 @@ include '../../includes/header.php';
         </div>
 
         <h4 style="margin:1rem 0 0.5rem;">Materials from the purchase request</h4>
-        <p id="poPriceNote" style="color:#b45309;display:none;">Wala pang unit price ng supplier sa materials na ito. Ilagay ito sa price comparison, tapos i-accept ang supplier.</p>
+        <p id="poPriceNote" style="color:#b45309;display:none;">These materials do not have a supplier unit price yet. Enter it in the price comparison, then accept the supplier.</p>
         <div class="table-responsive">
             <table class="table">
                 <thead>

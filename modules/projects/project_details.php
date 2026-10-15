@@ -75,7 +75,7 @@ try {
     if ($id <= 0) {
         $all_projects = $pdo->query("SELECT id, project_code, name, location, status, estimated_budget, start_date, end_date FROM projects ORDER BY created_at DESC")->fetchAll();
     } else {
-        $stmt = $pdo->prepare("SELECT * FROM projects WHERE id = ?");
+        $stmt = $pdo->prepare("SELECT p.*, vpc.actual_cost, vpc.pending_cost, vpc.budget_variance, vpc.expense_total, vpc.purchase_total FROM projects p LEFT JOIN v_project_costs vpc ON vpc.project_id = p.id WHERE p.id = ?");
         $stmt->execute([$id]);
         $project = $stmt->fetch();
 
@@ -187,7 +187,7 @@ include '../../includes/header.php';
 </div>
 
 <div class="card">
-    <p class="muted-note"><?php echo $view === 'implementation' ? 'Piliin ang project na ipinatutupad. Dito ang personnel, materials, at progress ng site.' : 'Piliin ang project para sa planning.'; ?></p>
+    <p class="muted-note"><?php echo $view === 'implementation' ? 'Choose the project under implementation. Personnel, materials, and site progress are shown here.' : 'Choose the project for planning.'; ?></p>
     <div class="table-responsive">
         <table class="table">
             <thead>
@@ -266,11 +266,11 @@ include '../../includes/header.php';
         </div>
         <div class="detail-item">
             <div class="label">Start Date</div>
-            <div class="value"><?php echo $project['start_date'] ? date('M d, Y', strtotime($project['start_date'])) : 'N/A'; ?></div>
+            <div class="value"><?php echo formatDisplayDate($project['start_date'] ?? null); ?></div>
         </div>
         <div class="detail-item">
             <div class="label">End Date</div>
-            <div class="value"><?php echo $project['end_date'] ? date('M d, Y', strtotime($project['end_date'])) : 'N/A'; ?></div>
+            <div class="value"><?php echo formatDisplayDate($project['end_date'] ?? null); ?></div>
         </div>
         <div class="detail-item">
             <div class="label">Estimated Budget</div>
@@ -278,7 +278,11 @@ include '../../includes/header.php';
         </div>
         <div class="detail-item">
             <div class="label">Actual Cost</div>
-            <div class="value" style="color:#e74a3b;">₱<?php echo number_format($project['actual_cost'] ?? 0, 2); ?></div>
+            <div class="value" style="color:#e74a3b;<?php echo ((float) ($project['actual_cost'] ?? 0) > (float) $project['estimated_budget']) ? 'background:#fee2e2;padding:0.2rem 0.4rem;border-radius:6px;' : ''; ?>">₱<?php echo number_format((float) ($project['actual_cost'] ?? 0), 2); ?></div>
+        </div>
+        <div class="detail-item">
+            <div class="label">Pending/Committed</div>
+            <div class="value">₱<?php echo number_format((float) ($project['pending_cost'] ?? 0), 2); ?></div>
         </div>
         <div class="detail-item">
             <div class="label">Budget Variance</div>

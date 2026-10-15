@@ -26,6 +26,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $items = $_POST['items'] ?? [];
         
         $errors = [];
+        if ($project_id <= 0) $errors[] = 'Project is required.';
         if (empty($purpose)) $errors[] = 'Purpose is required.';
         if (empty($items)) $errors[] = 'At least one item is required.';
         
@@ -235,7 +236,7 @@ include '../../includes/header.php';
     <?php endif; ?>
 </div>
 
-<p style="color:#64748b;margin-top:0;">Tanggapin muna ang request, pumili ng supplier sa Price / Supplier Comparison, tapos gumawa ng purchase order.</p>
+<p style="color:#64748b;margin-top:0;">Receive the request first, choose a supplier in Price / Supplier Comparison, then create the purchase order.</p>
 
 <?php if (isset($_SESSION['success'])): ?>
     <div class="alert alert-success"><?php echo htmlspecialchars($_SESSION['success']); unset($_SESSION['success']); ?></div>

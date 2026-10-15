@@ -49,10 +49,11 @@ $edit_row = null;
 try {
     $projects = $pdo->query("SELECT id, project_code, name FROM projects ORDER BY name")->fetchAll();
     $rows = $pdo->query("
-        SELECT p.id, p.project_code, p.name, p.status, p.estimated_budget, p.actual_cost,
+        SELECT p.id, p.project_code, p.name, p.status, p.estimated_budget, vpc.actual_cost, vpc.pending_cost,
                pf.id AS financial_id, pf.contract_amount, pf.additional_budget, pf.notes, pf.updated_at,
-               (p.estimated_budget + COALESCE(pf.additional_budget, 0) - p.actual_cost) AS variance
+               (p.estimated_budget + COALESCE(pf.additional_budget, 0) - vpc.actual_cost) AS variance
         FROM projects p
+        LEFT JOIN v_project_costs vpc ON vpc.project_id = p.id
         LEFT JOIN project_financials pf ON pf.project_id = p.id
         ORDER BY p.created_at DESC
     ")->fetchAll();
@@ -137,22 +138,24 @@ include '../../includes/header.php';
                     <th>Budget</th>
                     <th>Additional</th>
                     <th>Actual cost</th>
+                    <th>Pending/Committed</th>
                     <th>Variance</th>
                     <th></th>
                 </tr>
             </thead>
             <tbody>
                 <?php if (empty($rows)): ?>
-                    <tr><td colspan="8" class="table-empty">No projects found.</td></tr>
+                    <tr><td colspan="9" class="table-empty">No projects found.</td></tr>
                 <?php else: ?>
                     <?php foreach ($rows as $row): ?>
-                    <tr>
+                    <tr<?php echo ((float) $row['actual_cost'] > (float) $row['estimated_budget']) ? ' style="background:#fee2e2;"' : ''; ?>>
                         <td><strong><?php echo htmlspecialchars(displayDocumentCode($row['project_code'])); ?></strong></td>
                         <td><?php echo htmlspecialchars($row['name']); ?></td>
                         <td>₱<?php echo number_format((float)($row['contract_amount'] ?? 0), 2); ?></td>
                         <td>₱<?php echo number_format((float)$row['estimated_budget'], 2); ?></td>
                         <td>₱<?php echo number_format((float)($row['additional_budget'] ?? 0), 2); ?></td>
                         <td>₱<?php echo number_format((float)$row['actual_cost'], 2); ?></td>
+                        <td>₱<?php echo number_format((float)($row['pending_cost'] ?? 0), 2); ?></td>
                         <td>₱<?php echo number_format((float)$row['variance'], 2); ?></td>
                         <td>
                             <?php if (canWriteDepartmentData('projects')): ?>

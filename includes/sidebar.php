@@ -40,6 +40,14 @@ if ($department === 'warehouse') {
 if ($is_admin) {
     $expanded_sections[] = 'administration';
 }
+$accounting_new_projects = 0;
+if ($show_accounting && isset($pdo)) {
+    try {
+        $accounting_new_projects = (int) $pdo->query("SELECT COUNT(*) FROM projects WHERE accounting_status = 'pending'")->fetchColumn();
+    } catch (Throwable $e) {
+        $accounting_new_projects = 0;
+    }
+}
 
 // If no section is expanded, expand the user's department
 if (empty($expanded_sections)) {
@@ -144,6 +152,13 @@ if ($sidebar_width > 400) $sidebar_width = 400;
                 <a href="<?php echo APP_URL; ?>modules/accounting/dashboard.php" class="nav-item <?php echo $current_module === 'accounting' && $current_page === 'dashboard.php' ? 'active' : ''; ?>">
                     <i class="fas fa-chart-line"></i>
                     <span>Dashboard</span>
+                </a>
+                <a href="<?php echo APP_URL; ?>modules/accounting/received_projects.php" class="nav-item <?php echo $current_module === 'accounting' && $current_page === 'received_projects.php' ? 'active' : ''; ?>">
+                    <i class="fas fa-inbox"></i>
+                    <span>Received Projects</span>
+                    <?php if ($accounting_new_projects > 0): ?>
+                        <span class="nav-badge warning"><?php echo (int) $accounting_new_projects; ?></span>
+                    <?php endif; ?>
                 </a>
                 <a href="<?php echo APP_URL; ?>modules/accounting/project_financials.php" class="nav-item <?php echo $current_module === 'accounting' && $current_page === 'project_financials.php' ? 'active' : ''; ?>">
                     <i class="fas fa-project-diagram"></i>

@@ -115,8 +115,8 @@ try {
 ?>
 <?php if ($release_rows): ?>
 <div class="card">
-    <h3 class="section-title"><i class="fas fa-dolly"></i> Natanggap na, para i-release sa site</h3>
-    <p style="color:#64748b;margin-top:0;">Ito ang request ng Engineering na na-order ng Procurement at natanggap na ng Warehouse.</p>
+    <h3 class="section-title"><i class="fas fa-dolly"></i> Received, ready to release to the site</h3>
+    <p style="color:#64748b;margin-top:0;">These are Engineering requests that Procurement ordered and the Warehouse has received.</p>
     <div class="table-responsive">
         <table class="table">
             <thead>
@@ -135,7 +135,7 @@ try {
                 <?php foreach ($release_rows as $release): ?>
                 <tr>
                     <td><strong><?php echo htmlspecialchars($release['project_code']); ?></strong><div style="color:#64748b;font-size:0.8rem;"><?php echo htmlspecialchars($release['project_name']); ?></div></td>
-                    <td><?php echo htmlspecialchars($release['location'] ?: 'Walang location'); ?></td>
+                    <td><?php echo htmlspecialchars($release['location'] ?: 'No location'); ?></td>
                     <td><?php echo htmlspecialchars($release['engineer_name'] ?? 'N/A'); ?></td>
                     <td><?php echo htmlspecialchars($release['pr_number'] ?? ''); ?></td>
                     <td><?php echo htmlspecialchars($release['material_name'] ?? 'Material'); ?></td>

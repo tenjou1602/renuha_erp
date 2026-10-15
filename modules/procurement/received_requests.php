@@ -37,7 +37,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['send_to_warehouse']))
         $stmt = $pdo->prepare("UPDATE purchase_orders SET status = 'ready_for_warehouse' WHERE id = ? AND status IN ('confirmed', 'sent')");
         $stmt->execute([$po_id]);
         $_SESSION['success'] = $stmt->rowCount()
-            ? 'Naipadala na sa Warehouse ang order. Tatanggapin nila ito, tapos ire-release sa site ng Engineering.'
+            ? 'The order has been sent to the Warehouse. They will receive it, then release it to the Engineering site.'
             : 'Set the order to Sent or Confirmed before sending it to Warehouse.';
     } catch (PDOException $e) {
         $_SESSION['error'] = userDatabaseError($e, 'Procurement');
@@ -82,7 +82,7 @@ include '../../includes/header.php';
     <div class="alert alert-danger"><?php echo htmlspecialchars($error); ?></div>
 <?php endif; ?>
 
-<p style="color:#64748b;">Sunod lang ito: 1) Tanggapin ang request mula sa Engineering. 2) Ikumpara ang presyo at tanggapin ang isang supplier. 3) Gumawa ng purchase order. 4) Ipadala sa Warehouse. Kapag natanggap at na-release na sa site, ico-complete ng Engineering ang request.</p>
+<p style="color:#64748b;">Follow this order: 1) Receive the request from Engineering. 2) Compare prices and accept one supplier. 3) Create the purchase order. 4) Send it to the Warehouse. After the Warehouse receives and releases the materials, Engineering marks the request complete.</p>
 
 <div class="card">
     <div class="table-responsive">

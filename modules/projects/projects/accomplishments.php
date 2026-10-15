@@ -10,9 +10,10 @@ $personnel = [];
 
 try {
     $completed = $pdo->query("
-        SELECT id, project_code, name, location, end_date, actual_cost, estimated_budget
-        FROM projects
-        WHERE status = 'completed'
+        SELECT p.id, p.project_code, p.name, p.location, p.end_date, vpc.actual_cost, p.estimated_budget
+        FROM projects p
+        LEFT JOIN v_project_costs vpc ON vpc.project_id = p.id
+        WHERE p.status = 'completed'
         ORDER BY end_date DESC, updated_at DESC
     ")->fetchAll();
 

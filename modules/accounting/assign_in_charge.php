@@ -28,6 +28,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['assign_pic'])) {
                 $stmt = $pdo->prepare("UPDATE projects SET in_charge_id = ?, assigned_to = ? WHERE id = ?");
                 $stmt->execute([$in_charge_id, $in_charge_id, $project_id]);
                 logActivity($_SESSION['user_id'], 'Assigned project in-charge', 'Accounting', $person['full_name'] . ' to project ' . $project_id);
+                $assigned = notifyProjectCode($project_id);
+                notify($in_charge_id, 'pic_assigned', 'Project assignment', 'You have been assigned to ' . $assigned['project_code'] . '.', 'modules/projects/project_details.php?id=' . $project_id, $project_id, 'project', $project_id);
                 $_SESSION['success'] = 'Project In-Charge assigned. Engineering can now implement the project.';
             }
         } catch (PDOException $e) {

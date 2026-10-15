@@ -19,7 +19,7 @@ try {
     if ($id <= 0) {
         $all_projects = $pdo->query("SELECT id, project_code, name, location, status, estimated_budget, start_date, end_date FROM projects ORDER BY created_at DESC")->fetchAll();
     } else {
-        $stmt = $pdo->prepare("SELECT * FROM projects WHERE id = ?");
+        $stmt = $pdo->prepare("SELECT p.*, vpc.actual_cost, vpc.pending_cost, vpc.budget_variance FROM projects p LEFT JOIN v_project_costs vpc ON vpc.project_id = p.id WHERE p.id = ?");
         $stmt->execute([$id]);
         $project = $stmt->fetch();
 

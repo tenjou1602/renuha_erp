@@ -15,7 +15,7 @@ if ($id <= 0) {
 }
 
 try {
-    $stmt = $pdo->prepare("SELECT * FROM projects WHERE id = ?");
+    $stmt = $pdo->prepare("SELECT p.*, vpc.actual_cost, vpc.pending_cost, vpc.budget_variance FROM projects p LEFT JOIN v_project_costs vpc ON vpc.project_id = p.id WHERE p.id = ?");
     $stmt->execute([$id]);
     $project = $stmt->fetch();
     if (!$project) {

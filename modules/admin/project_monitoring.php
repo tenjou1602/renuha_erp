@@ -19,10 +19,12 @@ $active = array_values(array_filter($projects, function ($project) {
 }));
 $budget = 0.0;
 $actual = 0.0;
+$pending = 0.0;
 $stage_groups = [];
 foreach ($projects as $project) {
     $budget += (float) $project['estimated_budget'];
     $actual += (float) $project['cost_to_date'];
+    $pending += (float) ($project['pending_cost'] ?? 0);
     $label = $project['stage']['label'];
     if (!isset($stage_groups[$label])) {
         $stage_groups[$label] = ['count' => 0, 'owner' => $project['stage']['owner'], 'tone' => $project['stage']['tone']];
@@ -61,6 +63,7 @@ include '../../includes/header.php';
     <div class="aq-kpi orange">
         <div class="num">₱<?php echo number_format($actual, 2); ?></div>
         <div class="lbl">ACTUAL COST TO DATE</div>
+        <div class="lbl">Pending/Committed ₱<?php echo number_format($pending, 2); ?></div>
     </div>
     <div class="aq-kpi green">
         <div class="num"><?php echo number_format($utilization, 1); ?>%</div>
@@ -111,7 +114,7 @@ include '../../includes/header.php';
                         $end = adminFormatDate($project['end_date'] ?? '');
                         $dates = trim($start . ($start && $end ? ' – ' : '') . $end);
                     ?>
-                    <tr id="project-<?php echo (int) $project['id']; ?>">
+                    <tr id="project-<?php echo (int) $project['id']; ?>"<?php echo ((float) $project['cost_to_date'] > (float) $project['estimated_budget']) ? ' style="background:#fee2e2;"' : ''; ?>>
                         <td>
                             <strong><?php echo htmlspecialchars(displayDocumentCode($project['project_code'])); ?></strong>
                             <div style="color:#64748b;font-size:.8rem;"><?php echo htmlspecialchars($project['name']); ?></div>
@@ -132,6 +135,7 @@ include '../../includes/header.php';
                         <td>
                             ₱<?php echo number_format((float) $project['estimated_budget'], 2); ?>
                             <div style="color:#64748b;font-size:.8rem;">Actual: ₱<?php echo number_format((float) $project['cost_to_date'], 2); ?></div>
+                            <div style="color:#64748b;font-size:.8rem;">Pending/Committed: ₱<?php echo number_format((float) ($project['pending_cost'] ?? 0), 2); ?></div>
                         </td>
                         <td><?php echo htmlspecialchars($project['engineer_name'] ?: 'Unassigned'); ?></td>
                         <td><?php echo htmlspecialchars($dates !== '' ? $dates : '—'); ?></td>

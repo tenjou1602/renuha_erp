@@ -15,7 +15,7 @@ try {
     $stats['planning_projects'] = $pdo->query("SELECT COUNT(*) FROM projects WHERE status = 'planning'")->fetchColumn() ?? 0;
     $stats['on_hold_projects'] = $pdo->query("SELECT COUNT(*) FROM projects WHERE status = 'on_hold'")->fetchColumn() ?? 0;
     $stats['total_budget'] = $pdo->query("SELECT COALESCE(SUM(estimated_budget), 0) FROM projects")->fetchColumn() ?? 0;
-    $stats['total_cost'] = $pdo->query("SELECT COALESCE(SUM(actual_cost), 0) FROM projects WHERE status IN ('ongoing', 'completed')")->fetchColumn() ?? 0;
+    $stats['total_cost'] = $pdo->query("SELECT COALESCE(SUM(vpc.actual_cost), 0) FROM v_project_costs vpc INNER JOIN projects p ON p.id = vpc.project_id WHERE p.status IN ('ongoing', 'completed')")->fetchColumn() ?? 0;
     
     // Recent projects
     $recent_projects = $pdo->query("SELECT * FROM projects ORDER BY created_at DESC LIMIT 5")->fetchAll();

@@ -217,12 +217,13 @@ try {
     $cost_trend_actual = [];
     try {
         $trend_rows = $pdo->query("
-            SELECT DATE_FORMAT(COALESCE(start_date, created_at), '%b') AS label,
-                   DATE_FORMAT(COALESCE(start_date, created_at), '%Y-%m') AS ym,
-                   COALESCE(SUM(estimated_budget), 0) AS budget,
-                   COALESCE(SUM(actual_cost), 0) AS actual
-            FROM projects
-            WHERE COALESCE(start_date, created_at) >= DATE_SUB(CURDATE(), INTERVAL 5 MONTH)
+            SELECT DATE_FORMAT(COALESCE(p.start_date, p.created_at), '%b') AS label,
+                   DATE_FORMAT(COALESCE(p.start_date, p.created_at), '%Y-%m') AS ym,
+                   COALESCE(SUM(p.estimated_budget), 0) AS budget,
+                   COALESCE(SUM(vpc.actual_cost), 0) AS actual
+            FROM projects p
+            LEFT JOIN v_project_costs vpc ON vpc.project_id = p.id
+            WHERE COALESCE(p.start_date, p.created_at) >= DATE_SUB(CURDATE(), INTERVAL 5 MONTH)
             GROUP BY ym, label
             ORDER BY ym
         ")->fetchAll();
@@ -247,9 +248,10 @@ try {
     try {
         $project_overview = $pdo->query("
             SELECT p.id, p.project_code, p.name, p.status, p.location, p.client, p.start_date, p.end_date,
-                   p.estimated_budget, p.actual_cost, p.progress,
+                   p.estimated_budget, vpc.actual_cost, vpc.pending_cost, p.progress,
                    COALESCE(ua.full_name, ui.full_name) AS in_charge_name
             FROM projects p
+            LEFT JOIN v_project_costs vpc ON vpc.project_id = p.id
             LEFT JOIN users ua ON p.assigned_to = ua.id
             LEFT JOIN users ui ON p.in_charge_id = ui.id
             ORDER BY p.created_at DESC
@@ -258,15 +260,17 @@ try {
     } catch (PDOException $e) {
         try {
             $project_overview = $pdo->query("
-                SELECT id, project_code, name, status, location, client, start_date, end_date, estimated_budget, actual_cost, progress
-                FROM projects
+                SELECT p.id, p.project_code, p.name, p.status, p.location, p.client, p.start_date, p.end_date, p.estimated_budget, vpc.actual_cost, vpc.pending_cost, p.progress
+                FROM projects p
+                LEFT JOIN v_project_costs vpc ON vpc.project_id = p.id
                 ORDER BY created_at DESC
                 LIMIT 8
             ")->fetchAll();
         } catch (PDOException $e2) {
             $project_overview = $pdo->query("
-                SELECT id, project_code, name, status, location, start_date, end_date, estimated_budget, actual_cost
-                FROM projects
+                SELECT p.id, p.project_code, p.name, p.status, p.location, p.start_date, p.end_date, p.estimated_budget, vpc.actual_cost, vpc.pending_cost
+                FROM projects p
+                LEFT JOIN v_project_costs vpc ON vpc.project_id = p.id
                 ORDER BY created_at DESC
                 LIMIT 8
             ")->fetchAll();
@@ -277,7 +281,7 @@ try {
     $consolidated_reports = [
         'total_projects' => $pdo->query("SELECT COUNT(*) FROM projects")->fetchColumn() ?? 0,
         'total_budget' => $pdo->query("SELECT COALESCE(SUM(estimated_budget), 0) FROM projects")->fetchColumn() ?? 0,
-        'total_actual_cost' => $pdo->query("SELECT COALESCE(SUM(actual_cost), 0) FROM projects")->fetchColumn() ?? 0,
+        'total_actual_cost' => $pdo->query("SELECT COALESCE(SUM(actual_cost), 0) FROM v_project_costs")->fetchColumn() ?? 0,
         'total_invoices' => $pdo->query("SELECT COUNT(*) FROM invoices")->fetchColumn() ?? 0,
         'total_invoice_amount' => $pdo->query("SELECT COALESCE(SUM(amount), 0) FROM invoices")->fetchColumn() ?? 0,
         'total_expenses' => $pdo->query("SELECT COALESCE(SUM(amount), 0) FROM expenses")->fetchColumn() ?? 0,

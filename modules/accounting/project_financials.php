@@ -8,6 +8,33 @@ $page_title = 'Project Financial Records';
 $action = $_GET['action'] ?? 'list';
 $id = (int)($_GET['id'] ?? 0);
 
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['receive_project']) || isset($_POST['reject_project']))) {
+    if (!canWriteDepartmentData('accounting')) {
+        $_SESSION['error'] = 'You cannot update project financial status.';
+    } else {
+        $projectId = (int) ($_POST['project_id'] ?? 0);
+        if (isset($_POST['reject_project'])) {
+            $stmt = $pdo->prepare("UPDATE projects SET accounting_status = 'rejected' WHERE id = ? AND accounting_status = 'pending'");
+            $stmt->execute([$projectId]);
+            if ($stmt->rowCount() === 1) {
+                notifyProjectRejected($projectId);
+                $_SESSION['success'] = 'Project rejected.';
+            }
+        } else {
+            $stmt = $pdo->prepare("UPDATE projects SET accounting_status = 'received', accounting_received_at = COALESCE(accounting_received_at, NOW()) WHERE id = ? AND accounting_status = 'pending'");
+            $stmt->execute([$projectId]);
+            if ($stmt->rowCount() === 1) {
+                $pdo->prepare("UPDATE material_requests SET flow_status = 'warehouse' WHERE project_id = ? AND flow_status = 'accounting'")->execute([$projectId]);
+                $pdo->prepare("UPDATE purchase_orders po INNER JOIN purchase_requests pr ON pr.id = po.purchase_request_id SET po.status = 'ready_for_warehouse' WHERE pr.project_id = ? AND po.status IN ('sent', 'confirmed')")->execute([$projectId]);
+                notifyAccountingReceived($projectId);
+                $_SESSION['success'] = 'Project received.';
+            }
+        }
+    }
+    header('Location: project_financials.php');
+    exit();
+}
+
 // Get project financial records
 $project_records = [];
 try {
@@ -18,12 +45,14 @@ try {
             p.name,
             p.description,
             p.estimated_budget,
-            p.actual_cost,
-            (p.estimated_budget - p.actual_cost) as remaining_budget,
+            vpc.actual_cost,
+            vpc.pending_cost,
+            vpc.budget_variance as remaining_budget,
             p.status,
             p.start_date,
             p.end_date,
             p.client,
+            p.accounting_status,
             (SELECT COUNT(*) FROM invoices inv WHERE inv.project_id = p.id) as invoice_count,
             (SELECT COALESCE(SUM(CASE WHEN inv.status = 'paid' THEN inv.amount ELSE 0 END), 0) FROM invoices inv WHERE inv.project_id = p.id) as paid_invoices,
             (SELECT COALESCE(SUM(inv.amount), 0) FROM invoices inv WHERE inv.project_id = p.id) as total_invoices,
@@ -31,8 +60,9 @@ try {
             (SELECT COALESCE(SUM(CASE WHEN exp.status = 'paid' THEN exp.amount ELSE 0 END), 0) FROM expenses exp WHERE exp.project_id = p.id) as paid_expenses,
             (SELECT COALESCE(SUM(exp.amount), 0) FROM expenses exp WHERE exp.project_id = p.id) as total_expenses,
             (SELECT COUNT(*) FROM purchase_requests pr WHERE pr.project_id = p.id) as purchase_request_count,
-            (SELECT COALESCE(SUM(CASE WHEN pr.status IN ('approved', 'confirmed', 'ordered', 'received', 'completed') THEN pr.total_amount ELSE 0 END), 0) FROM purchase_requests pr WHERE pr.project_id = p.id) as purchase_costs
+            vpc.purchase_total as purchase_costs
         FROM projects p
+        LEFT JOIN v_project_costs vpc ON vpc.project_id = p.id
         ORDER BY p.created_at DESC
     ";
     $project_records = $pdo->query($query)->fetchAll();
@@ -51,7 +81,10 @@ if ($action === 'view' && $id > 0) {
         $stmt = $pdo->prepare("
             SELECT 
                 p.*,
-                (p.estimated_budget - p.actual_cost) as remaining_budget,
+                vpc.actual_cost,
+                vpc.pending_cost,
+                vpc.budget_variance as remaining_budget,
+                vpc.purchase_total,
                 (SELECT COUNT(*) FROM invoices inv WHERE inv.project_id = p.id) as invoice_count,
                 (SELECT COALESCE(SUM(CASE WHEN inv.status = 'paid' THEN inv.amount ELSE 0 END), 0) FROM invoices inv WHERE inv.project_id = p.id) as paid_invoices,
                 (SELECT COALESCE(SUM(inv.amount), 0) FROM invoices inv WHERE inv.project_id = p.id) as total_invoices,
@@ -59,6 +92,7 @@ if ($action === 'view' && $id > 0) {
                 (SELECT COALESCE(SUM(CASE WHEN exp.status = 'paid' THEN exp.amount ELSE 0 END), 0) FROM expenses exp WHERE exp.project_id = p.id) as paid_expenses,
                 (SELECT COALESCE(SUM(exp.amount), 0) FROM expenses exp WHERE exp.project_id = p.id) as total_expenses
             FROM projects p
+            LEFT JOIN v_project_costs vpc ON vpc.project_id = p.id
             WHERE p.id = ?
         ");
         $stmt->execute([$id]);
@@ -143,6 +177,10 @@ include '../../includes/header.php';
         <div style="font-size:0.75rem;color:#64748b;">Total Actual Cost</div>
         <div class="stat-amount">₱<?php echo number_format((float) array_sum(array_column($project_records, 'actual_cost')), 2); ?></div>
     </div>
+    <div class="card" style="border-left-color:#f6c23e;margin:0;">
+        <div style="font-size:0.75rem;color:#64748b;">Pending/Committed</div>
+        <div class="stat-amount">₱<?php echo number_format((float) array_sum(array_column($project_records, 'pending_cost')), 2); ?></div>
+    </div>
     <div class="card" style="border-left-color:#36b9cc;margin:0;">
         <div style="font-size:0.75rem;color:#64748b;">Total Remaining</div>
         <div class="stat-amount">₱<?php echo number_format((float) array_sum(array_column($project_records, 'remaining_budget')), 2); ?></div>
@@ -162,6 +200,7 @@ include '../../includes/header.php';
         <div class="detail-row"><span>End Date:</span> <?php echo $project_details['end_date'] ? date('M d, Y', strtotime($project_details['end_date'])) : 'N/A'; ?></div>
         <div class="detail-row"><span>Estimated Budget:</span> <strong>₱<?php echo number_format($project_details['estimated_budget'], 2); ?></strong></div>
         <div class="detail-row"><span>Actual Cost:</span> <strong>₱<?php echo number_format($project_details['actual_cost'], 2); ?></strong></div>
+        <div class="detail-row"><span>Pending/Committed:</span> <strong>₱<?php echo number_format((float) ($project_details['pending_cost'] ?? 0), 2); ?></strong></div>
         <div class="detail-row"><span>Remaining Budget:</span> <strong class="<?php echo $project_details['remaining_budget'] >= 0 ? 'budget-positive' : 'budget-negative'; ?>">₱<?php echo number_format($project_details['remaining_budget'], 2); ?></strong></div>
         <?php
             $quote_pipeline = 0;
@@ -354,7 +393,8 @@ include '../../includes/header.php';
                     <th onclick="sortTable('projectTable', 1)" style="cursor:pointer;">Name <i class="fas fa-sort"></i></th>
                     <th onclick="sortTable('projectTable', 2)" style="cursor:pointer;">Budget <i class="fas fa-sort"></i></th>
                     <th onclick="sortTable('projectTable', 3)" style="cursor:pointer;">Actual Cost <i class="fas fa-sort"></i></th>
-                    <th onclick="sortTable('projectTable', 4)" style="cursor:pointer;">Remaining <i class="fas fa-sort"></i></th>
+                    <th onclick="sortTable('projectTable', 4)" style="cursor:pointer;">Pending/Committed <i class="fas fa-sort"></i></th>
+                    <th onclick="sortTable('projectTable', 5)" style="cursor:pointer;">Remaining <i class="fas fa-sort"></i></th>
                     <th onclick="sortTable('projectTable', 5)" style="cursor:pointer;">Invoices <i class="fas fa-sort"></i></th>
                     <th onclick="sortTable('projectTable', 6)" style="cursor:pointer;">Expenses <i class="fas fa-sort"></i></th>
                     <th onclick="sortTable('projectTable', 7)" style="cursor:pointer;">Purchase Costs <i class="fas fa-sort"></i></th>
@@ -365,25 +405,34 @@ include '../../includes/header.php';
             <tbody>
                 <?php if (empty($project_records)): ?>
                     <tr>
-                        <td colspan="10" style="text-align:center;color:#94a3b8;padding:2rem;">
+                        <td colspan="11" style="text-align:center;color:#94a3b8;padding:2rem;">
                             <i class="fas fa-project-diagram" style="font-size:2rem;display:block;margin-bottom:0.5rem;opacity:0.3;"></i>
                             No project financial records found.
                         </td>
                     </tr>
                 <?php else: ?>
                     <?php foreach ($project_records as $project): ?>
-                    <tr data-status="<?php echo htmlspecialchars($project['status']); ?>">
+                    <tr data-status="<?php echo htmlspecialchars($project['status']); ?>"<?php echo ((float) $project['actual_cost'] > (float) $project['estimated_budget']) ? ' style="background:#fee2e2;"' : ''; ?>>
                         <td><strong><?php echo htmlspecialchars($project['project_code']); ?></strong></td>
                         <td><?php echo htmlspecialchars($project['name']); ?></td>
                         <td>₱<?php echo number_format($project['estimated_budget'], 2); ?></td>
                         <td>₱<?php echo number_format($project['actual_cost'], 2); ?></td>
+                        <td>₱<?php echo number_format((float) ($project['pending_cost'] ?? 0), 2); ?></td>
                         <td class="<?php echo $project['remaining_budget'] >= 0 ? 'budget-positive' : 'budget-negative'; ?>">₱<?php echo number_format($project['remaining_budget'], 2); ?></td>
                         <td>₱<?php echo number_format($project['total_invoices'], 2); ?> (<?php echo $project['invoice_count']; ?>)</td>
                         <td>₱<?php echo number_format($project['total_expenses'], 2); ?> (<?php echo $project['expense_count']; ?>)</td>
                         <td>₱<?php echo number_format($project['purchase_costs'], 2); ?> (<?php echo $project['purchase_request_count']; ?>)</td>
                         <td><span class="badge badge-<?php echo $project['status']; ?>"><?php echo ucfirst($project['status']); ?></span></td>
                         <td>
-                            <a href="?action=view&id=<?php echo $project['id']; ?>" class="btn btn-sm btn-info" title="View Details"><i class="fas fa-eye"></i></a>
+                            <a href="?action=view&id=<?php echo $project['id']; ?>" class="btn btn-sm btn-info" title="View">View</a>
+                            <a href="?action=view&id=<?php echo (int) $project['id']; ?>" class="btn btn-sm btn-outline" title="Details">Details</a>
+                            <?php if (canWriteDepartmentData('accounting') && ($project['accounting_status'] ?? 'pending') === 'pending'): ?>
+                            <form method="POST" style="display:inline;">
+                                <input type="hidden" name="project_id" value="<?php echo (int) $project['id']; ?>">
+                                <button type="submit" name="receive_project" class="btn btn-sm btn-success">Receive</button>
+                                <button type="submit" name="reject_project" class="btn btn-sm btn-danger" onclick="return confirm('Reject this project?')">Reject</button>
+                            </form>
+                            <?php endif; ?>
                         </td>
                     </tr>
                     <?php endforeach; ?>

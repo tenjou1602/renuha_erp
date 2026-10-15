@@ -47,7 +47,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             foreach ($request_items as $request_item) {
                 $unit_price = round((float) ($posted_prices[$request_item['id']] ?? 0), 2);
                 if ($unit_price <= 0) {
-                    $errors[] = 'Ilagay ang unit price ng supplier sa bawat material.';
+                    $errors[] = 'Enter the supplier unit price for every material.';
                     break;
                 }
             }
@@ -209,7 +209,7 @@ include '../../includes/header.php';
     <?php endif; ?>
 </div>
 
-<p style="color:#64748b;margin-top:0;">Ilagay ang unit price ng supplier sa bawat material. Isang supplier lang ang Accepted. Iyan ang presyong susundan ng purchase order.</p>
+<p style="color:#64748b;margin-top:0;">Enter the supplier unit price for every material. Only one supplier can be Accepted. That price is what the purchase order uses.</p>
 
 <?php if (isset($_SESSION['success'])): ?>
     <div class="alert alert-success"><?php echo htmlspecialchars($_SESSION['success']); unset($_SESSION['success']); ?></div>
@@ -311,7 +311,7 @@ include '../../includes/header.php';
         
         <h4 style="margin:1rem 0 0.5rem;">Supplier unit price per material</h4>
         <?php if ($action === 'edit' && !$saved_prices && (float) ($quotation_details['total_amount'] ?? 0) > 0): ?>
-            <p style="color:#b45309;">Ang dating kabuuang presyo ay ₱<?php echo number_format((float) $quotation_details['total_amount'], 2); ?>. Ilagay ang unit price ng supplier sa bawat material. Iyan ang gagamitin ng purchase order.</p>
+            <p style="color:#b45309;">The previous total was ₱<?php echo number_format((float) $quotation_details['total_amount'], 2); ?>. Enter the supplier unit price for every material. The purchase order uses those prices.</p>
         <?php endif; ?>
         <div class="table-responsive">
             <table class="table">

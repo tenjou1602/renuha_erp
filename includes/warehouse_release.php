@@ -12,13 +12,15 @@ function releasePendingProjectMaterials(PDO $pdo, int $projectId, int $userId): 
     $pdo->beginTransaction();
     try {
         $stmt = $pdo->prepare("
-            SELECT mr.id, mr.material_id, mr.quantity, mr.project_id,
+            SELECT mr.id, mr.material_id, mr.quantity, mr.project_id, mr.requested_by,
                    m.name AS material_name, m.unit, m.current_stock, m.min_stock,
-                   p.project_code, p.name AS project_name, p.location AS project_location
+                   p.project_code, p.name AS project_name, p.location AS project_location,
+                   pr.pr_number
             FROM material_requests mr
             INNER JOIN materials m ON m.id = mr.material_id
             INNER JOIN projects p ON p.id = mr.project_id
-            WHERE mr.project_id = ? AND mr.status = 'pending'
+            LEFT JOIN purchase_requests pr ON pr.id = mr.purchase_request_id
+            WHERE mr.project_id = ? AND mr.status = 'pending' AND mr.flow_status = 'warehouse'
             ORDER BY mr.id
             FOR UPDATE
         ");
@@ -26,7 +28,7 @@ function releasePendingProjectMaterials(PDO $pdo, int $projectId, int $userId): 
         $rows = $stmt->fetchAll();
         if (!$rows) {
             $pdo->rollBack();
-            throw new RuntimeException('Walang pending material request para sa project na ito.');
+            throw new RuntimeException('There is no material request waiting for release on this project.');
         }
 
         $projectLabel = trim(($rows[0]['project_code'] ?? '') . ' ' . ($rows[0]['project_name'] ?? ''));
@@ -74,6 +76,11 @@ function releasePendingProjectMaterials(PDO $pdo, int $projectId, int $userId): 
             $running[$materialId] -= $qty;
             $batches = warehouseIssueFifo($pdo, $materialId, $qty, $projectId, $reason, $userId);
             $mark->execute([$qty, $userId, (int) $row['id']]);
+            $pdo->prepare("UPDATE material_requests SET flow_status = 'released' WHERE id = ? AND flow_status = 'warehouse'")->execute([(int) $row['id']]);
+            $pdo->prepare("INSERT INTO warehouse_releases (material_request_id, project_id, engineer_id, quantity, status, released_by) VALUES (?, ?, ?, ?, 'released', ?)")
+                ->execute([(int) $row['id'], $projectId, (int) $row['requested_by'], $qty, $userId]);
+            $ref = $row['pr_number'] ?: ('request #' . (int) $row['id']);
+            notify((int) $row['requested_by'], 'materials_released', 'Materials released', 'Materials for ' . $ref . ' have been released. Please confirm receipt.', 'modules/projects/material_requirements.php', $projectId, 'material_request', (int) $row['id']);
 
             $minStock = (float) $row['min_stock'];
             $newStock = $previous - $qty;
@@ -91,9 +98,9 @@ function releasePendingProjectMaterials(PDO $pdo, int $projectId, int $userId): 
         if (!$released) {
             $pdo->rollBack();
             $names = implode(', ', array_map(static function ($item) {
-                return $item['name'] . ' (kailangan ' . number_format($item['need']) . ', stock ' . number_format($item['stock']) . ')';
+                return $item['name'] . ' (needed ' . number_format($item['need']) . ', stock ' . number_format($item['stock']) . ')';
             }, $short));
-            throw new RuntimeException('Hindi na-release. Kulang ang stock: ' . $names);
+            throw new RuntimeException('Nothing was released. Stock is short: ' . $names);
         }
 
         $pdo->commit();

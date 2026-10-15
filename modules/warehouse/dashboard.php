@@ -55,7 +55,7 @@ include '../../includes/header.php';
         <div>
             <p class="dept-kicker">Warehouse Department</p>
             <h1><i class="fas fa-warehouse"></i> Warehouse Dashboard</h1>
-            <p class="dept-sub">Kapag natanggap ang material request at may stock, i-release ito sa project site. Iyon ang stock-out.</p>
+            <p class="dept-sub">When a material request is received and stock is available, release it to the project site. This is the stock-out.</p>
         </div>
         <div class="dept-actions">
             <a href="stock.php?action=in" class="btn btn-primary"><i class="fas fa-arrow-down"></i> Stock-In</a>

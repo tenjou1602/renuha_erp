@@ -42,7 +42,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $item = $stmt->fetch();
             $remaining = $item ? (int) $item['quantity'] - (int) $item['received_quantity'] : 0;
             if (!$item || $remaining <= 0) {
-                throw new RuntimeException('Wala nang quantity na matatanggap sa line na ito.');
+                throw new RuntimeException('There is no remaining quantity to receive on this line.');
             }
             $pdo->beginTransaction();
             $batch = warehouseReceiveBatch(
@@ -69,7 +69,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 error_log('[Runeha ERP] sync received orders for release: ' . $syncError->getMessage());
             }
             logActivity($_SESSION['user_id'], 'Received stock', 'Warehouse', $item['po_number'] . ' batch ' . $batch . ' qty ' . $remaining);
-            $_SESSION['success'] = 'Natanggap ang ' . number_format($remaining) . '. Batch ' . $batch . ' (FIFO). Expiration ay optional.';
+            $_SESSION['success'] = 'Received ' . number_format($remaining) . '. Batch ' . $batch . ' (FIFO). Expiration is optional.';
             header('Location: stock.php?action=in');
             exit();
         } catch (Throwable $e) {
@@ -171,9 +171,9 @@ include '../../includes/header.php';
 <?php if (canWriteDepartmentData('warehouse') && $stock_action !== 'out'): ?>
 <div class="card" id="stock-in">
     <h3><i class="fas fa-arrow-down"></i> Receive Stock</h3>
-    <p style="color:#64748b;">Ang quantity ay galing sa purchase order. Ang batch number ay awtomatikong FIFO: pinakamatandang batch ang unang ilalabas. Puwedeng walang expiration.</p>
+    <p style="color:#64748b;">Quantity comes from the purchase order. The batch number is assigned automatically for FIFO: the oldest batch is issued first. Expiration can be left blank.</p>
     <?php if (!$incoming_lines): ?>
-        <p style="color:#94a3b8;">Wala pang purchase order na hinihintay. Kapag nag-send ang Procurement, dito na lalabas ang material, quantity, at batch.</p>
+        <p style="color:#94a3b8;">No purchase order is waiting. When Procurement sends one, the material, quantity, and batch appear here.</p>
     <?php else: ?>
         <?php $batchPreview = 1; ?>
         <?php foreach ($incoming_lines as $line): ?>
@@ -208,7 +208,7 @@ include '../../includes/header.php';
                 <div class="form-row">
                     <div class="form-group">
                         <label>Warehouse location</label>
-                        <input type="text" name="location" placeholder="Aisle / shelf, puwedeng blangko">
+                        <input type="text" name="location" placeholder="Aisle / shelf, optional">
                     </div>
                     <div class="form-group">
                         <label>Notes</label>
@@ -226,9 +226,9 @@ include '../../includes/header.php';
 <?php if ($stock_action === 'out'): ?>
 <div class="card" id="stock-out">
     <h3><i class="fas fa-arrow-up"></i> Release to project site</h3>
-    <p style="color:#64748b;">Dito lumalabas ang na-release sa Material Release. Ang release mismo ay doon pinipindot kapag may request at may stock.</p>
+    <p style="color:#64748b;">Releases made from Material Release are listed here. The release itself is confirmed there when a request exists and stock is available.</p>
     <?php if (!$site_releases): ?>
-        <p style="color:#94a3b8;">Wala pang na-release mula sa Material Release.</p>
+        <p style="color:#94a3b8;">Nothing has been released from Material Release yet.</p>
     <?php else: ?>
         <div class="table-responsive">
             <table class="table">
@@ -254,7 +254,7 @@ include '../../includes/header.php';
 <!-- Warehouse Stock List -->
 <div class="card">
     <h3><i class="fas fa-list"></i> Warehouse stock, FIFO</h3>
-    <p style="color:#64748b;">Pinakamatandang batch ang nasa unahan. Iyon ang unang lalabas sa release.</p>
+    <p style="color:#64748b;">The oldest batch is listed first. That batch is issued first on release.</p>
     <?php if (empty($warehouse_stock)): ?>
         <div class="empty-state">
             <i class="fas fa-warehouse"></i>

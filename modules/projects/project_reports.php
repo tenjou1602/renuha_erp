@@ -19,7 +19,7 @@ try {
             $report_data['active_projects'] = $pdo->query("SELECT COUNT(*) FROM projects WHERE status IN ('planning', 'ongoing')")->fetchColumn() ?? 0;
             $report_data['completed_projects'] = $pdo->query("SELECT COUNT(*) FROM projects WHERE status = 'completed'")->fetchColumn() ?? 0;
             $report_data['total_budget'] = $pdo->query("SELECT COALESCE(SUM(estimated_budget), 0) FROM projects")->fetchColumn() ?? 0;
-            $report_data['total_actual_cost'] = $pdo->query("SELECT COALESCE(SUM(amount), 0) FROM expenses WHERE status IN ('pending', 'paid')")->fetchColumn() ?? 0;
+            $report_data['total_actual_cost'] = $pdo->query("SELECT COALESCE(SUM(actual_cost), 0) FROM v_project_costs")->fetchColumn() ?? 0;
             
             // Project status breakdown
             $report_data['status_breakdown'] = $pdo->query("
@@ -48,16 +48,17 @@ try {
                         p.name,
                         p.status,
                         p.estimated_budget,
-                        p.actual_cost,
+                        vpc.actual_cost,
                         p.start_date,
                         p.end_date,
-                        (p.actual_cost / GREATEST(p.estimated_budget, 1)) * 100 as budget_utilization,
+                        (vpc.actual_cost / GREATEST(p.estimated_budget, 1)) * 100 as budget_utilization,
                         COUNT(DISTINCT a.id) as accomplishment_count,
                         COUNT(DISTINCT att.id) as attachment_count
                     FROM projects p
+                    LEFT JOIN v_project_costs vpc ON vpc.project_id = p.id
                     LEFT JOIN accomplishments a ON p.id = a.project_id
                     LEFT JOIN attachments att ON p.id = att.project_id
-                    GROUP BY p.id, p.project_code, p.name, p.status, p.estimated_budget, p.actual_cost, p.start_date, p.end_date
+                    GROUP BY p.id, p.project_code, p.name, p.status, p.estimated_budget, vpc.actual_cost, p.start_date, p.end_date
                     ORDER BY p.created_at DESC
                 ")->fetchAll();
             } catch (PDOException $e) {
@@ -68,15 +69,16 @@ try {
                         p.name,
                         p.status,
                         p.estimated_budget,
-                        p.actual_cost,
+                        vpc.actual_cost,
                         p.start_date,
                         p.end_date,
-                        (p.actual_cost / GREATEST(p.estimated_budget, 1)) * 100 as budget_utilization,
+                        (vpc.actual_cost / GREATEST(p.estimated_budget, 1)) * 100 as budget_utilization,
                         COUNT(DISTINCT a.id) as accomplishment_count,
                         0 as attachment_count
                     FROM projects p
+                    LEFT JOIN v_project_costs vpc ON vpc.project_id = p.id
                     LEFT JOIN accomplishments a ON p.id = a.project_id
-                    GROUP BY p.id, p.project_code, p.name, p.status, p.estimated_budget, p.actual_cost, p.start_date, p.end_date
+                    GROUP BY p.id, p.project_code, p.name, p.status, p.estimated_budget, vpc.actual_cost, p.start_date, p.end_date
                     ORDER BY p.created_at DESC
                 ")->fetchAll();
             }
@@ -140,15 +142,16 @@ try {
             // Project location analysis
             $report_data['location_analysis'] = $pdo->query("
                 SELECT 
-                    location,
+                    p.location,
                     COUNT(*) as project_count,
-                    COALESCE(SUM(estimated_budget), 0) as total_budget,
-                    COALESCE(SUM(actual_cost), 0) as total_cost,
-                    COUNT(CASE WHEN status = 'ongoing' THEN 1 END) as ongoing_count,
-                    COUNT(CASE WHEN status = 'completed' THEN 1 END) as completed_count
-                FROM projects
-                WHERE location IS NOT NULL AND location != ''
-                GROUP BY location
+                    COALESCE(SUM(p.estimated_budget), 0) as total_budget,
+                    COALESCE(SUM(vpc.actual_cost), 0) as total_cost,
+                    COUNT(CASE WHEN p.status = 'ongoing' THEN 1 END) as ongoing_count,
+                    COUNT(CASE WHEN p.status = 'completed' THEN 1 END) as completed_count
+                FROM projects p
+                LEFT JOIN v_project_costs vpc ON vpc.project_id = p.id
+                WHERE p.location IS NOT NULL AND p.location != ''
+                GROUP BY p.location
                 ORDER BY project_count DESC
             ")->fetchAll();
             
@@ -169,8 +172,8 @@ try {
                     p.project_code,
                     p.name,
                     p.estimated_budget,
-                    p.actual_cost,
-                    (p.estimated_budget - p.actual_cost) as remaining_budget,
+                    vpc.actual_cost,
+                    vpc.budget_variance as remaining_budget,
                     p.status,
                     (SELECT COUNT(*) FROM invoices inv WHERE inv.project_id = p.id) as invoice_count,
                     (SELECT COALESCE(SUM(inv.amount), 0) FROM invoices inv WHERE inv.project_id = p.id) as invoice_total,
@@ -179,19 +182,21 @@ try {
                     (SELECT COUNT(*) FROM client_quotations cq WHERE cq.project_id = p.id) as quote_count,
                     (SELECT COALESCE(SUM(cq.grand_total), 0) FROM client_quotations cq WHERE cq.project_id = p.id AND cq.status = 'approved') as quote_pipeline
                 FROM projects p
+                LEFT JOIN v_project_costs vpc ON vpc.project_id = p.id
                 ORDER BY p.created_at DESC
             ")->fetchAll();
             
             // Budget utilization by project
             $report_data['budget_utilization'] = $pdo->query("
                 SELECT 
-                    project_code,
-                    name,
-                    estimated_budget,
-                    actual_cost,
-                    (actual_cost / GREATEST(estimated_budget, 1)) * 100 as utilization_percentage
-                FROM projects
-                WHERE estimated_budget > 0
+                    p.project_code,
+                    p.name,
+                    p.estimated_budget,
+                    vpc.actual_cost,
+                    (vpc.actual_cost / GREATEST(p.estimated_budget, 1)) * 100 as utilization_percentage
+                FROM projects p
+                LEFT JOIN v_project_costs vpc ON vpc.project_id = p.id
+                WHERE p.estimated_budget > 0
                 ORDER BY utilization_percentage DESC
                 LIMIT 10
             ")->fetchAll();

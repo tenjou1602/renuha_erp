@@ -31,7 +31,8 @@ try {
     $stats['ongoing_projects'] = $pdo->query("SELECT COUNT(*) FROM projects WHERE status = 'ongoing'")->fetchColumn() ?? 0;
     $stats['completed_projects'] = $pdo->query("SELECT COUNT(*) FROM projects WHERE status = 'completed'")->fetchColumn() ?? 0;
     $stats['total_budget'] = $pdo->query("SELECT COALESCE(SUM(estimated_budget), 0) FROM projects")->fetchColumn() ?? 0;
-    $stats['actual_cost'] = $pdo->query("SELECT COALESCE(SUM(actual_cost), 0) FROM projects")->fetchColumn() ?? 0;
+    $stats['actual_cost'] = $pdo->query("SELECT COALESCE(SUM(actual_cost), 0) FROM v_project_costs")->fetchColumn() ?? 0;
+    $stats['pending_cost'] = $pdo->query("SELECT COALESCE(SUM(pending_cost), 0) FROM v_project_costs")->fetchColumn() ?? 0;
 
     try {
         $stats['accomplishments'] = $pdo->query("SELECT COUNT(*) FROM accomplishments")->fetchColumn() ?? 0;
@@ -118,7 +119,7 @@ include '../../includes/header.php';
 
     <div class="card">
         <h3><i class="fas fa-chart-bar"></i> Project monitoring</h3>
-        <canvas id="engChart" height="80"></canvas>
+        <div class="chart-compact"><canvas id="engChart"></canvas></div>
     </div>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
     <script>
@@ -137,7 +138,7 @@ include '../../includes/header.php';
                 backgroundColor: ['#4e73df', '#f6c23e', '#1cc88a', '#36b9cc', '#858796']
             }]
         },
-        options: { plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true, ticks: { precision: 0 } } } }
+        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true, ticks: { precision: 0 } } } }
     });
     </script>
 
@@ -157,7 +158,7 @@ include '../../includes/header.php';
                             <td><?php echo htmlspecialchars($project['name']); ?></td>
                             <td><?php echo htmlspecialchars($project['location'] ?? 'N/A'); ?></td>
                             <td><span class="dept-badge <?php echo htmlspecialchars($project['status']); ?>"><?php echo ucfirst(str_replace('_', ' ', $project['status'])); ?></span></td>
-                            <td><?php echo $project['end_date'] ? date('M d, Y', strtotime($project['end_date'])) : 'N/A'; ?></td>
+                            <td><?php echo formatDisplayDate($project['end_date'] ?? null); ?></td>
                         </tr>
                     <?php endforeach; ?>
                     </tbody>
