@@ -839,7 +839,7 @@ include '../../includes/header.php';
             <?php endif; ?>
         <?php endif; ?>
         <?php if ($quotation['status'] === 'approved' && empty($quotation['project_id'])): ?>
-            <a href="<?php echo APP_URL; ?>modules/projects/projects.php?action=add&source=quotation:<?php echo (int) $quotation['id']; ?>" class="btn btn-primary"><i class="fas fa-building"></i> Encode Project</a>
+            <a href="<?php echo APP_URL; ?>modules/projects/projects.php?action=add&source=quotation:<?php echo (int) $quotation['id']; ?>" class="btn btn-primary"><i class="fas fa-building"></i> Create Project</a>
         <?php endif; ?>
         <a href="quotations.php" class="btn btn-secondary"><i class="fas fa-arrow-left"></i> Back</a>
     </div>
@@ -875,7 +875,7 @@ include '../../includes/header.php';
                         <td>
                             <a href="?action=view&id=<?php echo (int) $quote['id']; ?>" class="btn btn-sm btn-info"><i class="fas fa-eye"></i></a>
                             <?php if ($quote['status'] === 'approved' && empty($quote['project_id'])): ?>
-                                <a href="<?php echo APP_URL; ?>modules/projects/projects.php?action=add&source=quotation:<?php echo (int) $quote['id']; ?>" class="btn btn-sm btn-primary" title="Encode project">Encode</a>
+                                <a href="<?php echo APP_URL; ?>modules/projects/projects.php?action=add&source=quotation:<?php echo (int) $quote['id']; ?>" class="btn btn-sm btn-primary" title="Create project">Create</a>
                             <?php endif; ?>
                         </td>
                     </tr>

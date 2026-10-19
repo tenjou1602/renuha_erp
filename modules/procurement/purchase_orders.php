@@ -68,6 +68,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $delivery_date = $delivery_date !== '' ? $delivery_date : null;
         $payment_terms = trim($_POST['payment_terms'] ?? '');
         $status = $_POST['status'] ?? 'draft';
+        $previousStatus = null;
+        if (isset($_POST['add_order'])) {
+            $status = 'sent';
+        } else {
+            $currentOrder = $pdo->prepare("SELECT status, received_at FROM purchase_orders WHERE id = ?");
+            $currentOrder->execute([$id]);
+            $currentRow = $currentOrder->fetch();
+            $previousStatus = $currentRow['status'] ?? null;
+            if ($currentRow && ($currentRow['received_at'] || in_array($currentRow['status'], ['ready_for_warehouse', 'delivered'], true))) {
+                $status = $currentRow['status'];
+            } elseif (!in_array($status, ['draft', 'sent', 'confirmed', 'cancelled'], true)) {
+                $status = 'sent';
+            }
+        }
         
         $errors = [];
         $acceptedQuote = null;
@@ -91,12 +105,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $supplier = trim((string) $acceptedQuote['supplier']);
                 $supplier_contact = trim((string) ($acceptedQuote['supplier_contact'] ?? ''));
                 if ($supplier_contact === '' || strcasecmp($supplier_contact, $supplier) === 0) {
-                    $phoneStmt = $pdo->prepare("SELECT phone FROM suppliers WHERE name = ? AND phone IS NOT NULL AND phone <> '' LIMIT 1");
-                    $phoneStmt->execute([$supplier]);
-                    $phone = trim((string) $phoneStmt->fetchColumn());
-                    if ($phone !== '') {
-                        $supplier_contact = $phone;
-                    }
+                    $companyStmt = $pdo->prepare("SELECT company_name FROM suppliers WHERE name = ? AND company_name IS NOT NULL AND company_name <> '' LIMIT 1");
+                    $companyStmt->execute([$supplier]);
+                    $companyName = trim((string) $companyStmt->fetchColumn());
+                    $supplier_contact = $companyName;
                 }
             }
         }
@@ -105,6 +117,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
         
         if (empty($errors)) {
+            $expenseId = 0;
             try {
                 $pdo->beginTransaction();
                 if (isset($_POST['add_order'])) {
@@ -120,8 +133,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $pdo->prepare("UPDATE purchase_requests SET total_amount = ? WHERE id = ?")->execute([$poTotal, $purchase_request_id]);
                     }
                     
+                    $expenseId = queuePurchaseOrderForAccounting($pdo, $orderId, (int) $_SESSION['user_id']);
                     logActivity($_SESSION['user_id'], 'Created purchase order', 'Procurement', "PO: $po_number");
-                    $_SESSION['success'] = "Purchase order created for ₱" . number_format($poTotal, 2) . " from the purchase request.";
+                    $_SESSION['success'] = $po_number . ' was sent to Accounting for ₱' . number_format($poTotal, 2) . '. Warehouse can receive the materials after Accounting marks them paid.';
                 } else {
                     $stmt = $pdo->prepare("UPDATE purchase_orders SET purchase_request_id = ?, project_id = ?, supplier = ?, supplier_contact = ?, order_date = ?, delivery_date = ?, payment_terms = ?, status = ? WHERE id = ?");
                     $stmt->execute([$purchase_request_id, $orderProjectId, $supplier, $supplier_contact, $order_date, $delivery_date, $payment_terms, $status, $id]);
@@ -131,6 +145,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $pdo->prepare("UPDATE purchase_requests SET status = 'ordered', total_amount = ? WHERE id = ? AND status IN ('approved', 'confirmed', 'ordered')")->execute([$poTotal, $purchase_request_id]);
                     }
                     
+                    if (in_array($status, ['sent', 'confirmed'], true)) {
+                        $expenseId = queuePurchaseOrderForAccounting($pdo, $id, (int) $_SESSION['user_id']);
+                    }
                     logActivity($_SESSION['user_id'], 'Updated purchase order', 'Procurement', "PO: $po_number");
                     $_SESSION['success'] = "Purchase order updated successfully!";
                 }
@@ -142,8 +159,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     }
                 }
                 $pdo->commit();
-                if (isset($_POST['add_order']) && !in_array($status, ['draft', 'cancelled'], true)) {
-                    notify('accounting', 'purchase_order', 'Purchase order', $po_number . ' was created and is waiting for Accounting.', 'modules/accounting/project_financials.php', $orderProjectId, 'purchase_order', (int) $orderId);
+                $sentToAccounting = isset($_POST['add_order']) || ($previousStatus === 'draft' && in_array($status, ['sent', 'confirmed'], true));
+                if ($sentToAccounting && !empty($expenseId)) {
+                    notify('accounting', 'purchase_order', 'Purchase order to pay', $po_number . ' is waiting for payment. The materials are listed on the expense.', 'modules/accounting/expenses.php?action=view&id=' . (int) $expenseId, $orderProjectId, 'purchase_order', (int) ($orderId ?? $id));
                 }
                 header('Location: purchase_orders.php');
                 exit();
@@ -164,16 +182,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
-if (isset($_POST['mark_ready_warehouse']) && canMarkReadyForWarehouse()) {
-    $po_id = (int)($_POST['po_id'] ?? 0);
-    try {
-        $stmt = $pdo->prepare("UPDATE purchase_orders SET status = 'ready_for_warehouse' WHERE id = ? AND status IN ('confirmed', 'sent')");
-        $stmt->execute([$po_id]);
-        logActivity($_SESSION['user_id'], 'Marked PO ready for warehouse', 'Procurement', 'PO id ' . $po_id);
-        $_SESSION['success'] = 'Purchase marked ready for Warehouse receiving.';
-    } catch (PDOException $e) {
-        $_SESSION['error'] = userDatabaseError($e);
-    }
+if (isset($_POST['mark_ready_warehouse'])) {
+    $_SESSION['error'] = 'Accounting pays the materials first. The order goes to Warehouse after it is paid.';
     header('Location: purchase_orders.php');
     exit();
 }
@@ -211,7 +221,7 @@ try {
 }
 $suppliers = [];
 try {
-    $suppliers = $pdo->query("SELECT id, name, contact_person, phone FROM suppliers WHERE status = 'active' ORDER BY name")->fetchAll();
+    $suppliers = $pdo->query("SELECT id, name, company_name, phone, email, address, tin_number FROM suppliers WHERE status = 'active' ORDER BY name")->fetchAll();
 } catch (PDOException $e) {
     $suppliers = [];
 }
@@ -230,6 +240,7 @@ try {
 } catch (PDOException $e) {
     $error = userDatabaseError($e);
 }
+$po_materials = purchaseOrderMaterialsByOrder($pdo);
 
 // Get single order
 $order_details = null;
@@ -330,7 +341,7 @@ include '../../includes/header.php';
 <!-- Add/Edit Form -->
 <div class="card">
     <h3><?php echo $action === 'add' ? 'Create New' : 'Edit'; ?> Purchase Order</h3>
-    <p style="color:#64748b;margin-top:0;">A purchase order can be created only after a supplier is accepted. Materials come from the request, and the supplier is the one accepted in the price comparison.</p>
+    <p style="color:#64748b;margin-top:0;">A purchase order can be created only after a supplier is accepted. The materials saved under this PO number are shown below. Create Order sends that number and its materials to Accounting for payment. Warehouse receives the items after Accounting marks them paid.</p>
     <form method="POST">
         <?php if ($action === 'edit'): ?>
             <input type="hidden" name="update_order" value="1">
@@ -380,7 +391,7 @@ include '../../includes/header.php';
                 <input type="text" name="supplier" id="supplierName" readonly value="<?php echo htmlspecialchars($prefill_supplier); ?>" placeholder="From the accepted supplier" style="background:#f8fafc;">
             </div>
             <div class="form-group">
-                <label>Supplier Contact</label>
+                <label>Company Name</label>
                 <input type="text" name="supplier_contact" id="supplierContact" readonly value="<?php echo htmlspecialchars($prefill_contact); ?>" style="background:#f8fafc;">
             </div>
         </div>
@@ -399,14 +410,27 @@ include '../../includes/header.php';
             </div>
             <div class="form-group">
                 <label>Status</label>
-                <select name="status">
-                    <option value="draft" <?php echo ($order_details['status'] ?? '') == 'draft' ? 'selected' : ''; ?>>Draft</option>
-                    <option value="sent" <?php echo ($order_details['status'] ?? '') == 'sent' ? 'selected' : ''; ?>>Sent</option>
-                    <option value="confirmed" <?php echo ($order_details['status'] ?? '') == 'confirmed' ? 'selected' : ''; ?>>Confirmed / Purchased</option>
-                    <option value="ready_for_warehouse" <?php echo ($order_details['status'] ?? '') == 'ready_for_warehouse' ? 'selected' : ''; ?>>Ready for Warehouse</option>
-                    <option value="delivered" <?php echo ($order_details['status'] ?? '') == 'delivered' ? 'selected' : ''; ?>>Delivered</option>
-                    <option value="cancelled" <?php echo ($order_details['status'] ?? '') == 'cancelled' ? 'selected' : ''; ?>>Cancelled</option>
-                </select>
+                <?php if ($action === 'add'): ?>
+                    <input type="hidden" name="status" value="sent">
+                    <input type="text" value="Sent to Accounting" disabled style="background:#f1f5f9;">
+                <?php else: ?>
+                    <?php $lockedStatus = in_array($order_details['status'] ?? '', ['ready_for_warehouse', 'delivered'], true); ?>
+                    <select name="status" <?php echo $lockedStatus ? 'disabled' : ''; ?>>
+                        <option value="draft" <?php echo ($order_details['status'] ?? '') == 'draft' ? 'selected' : ''; ?>>Draft</option>
+                        <option value="sent" <?php echo ($order_details['status'] ?? '') == 'sent' ? 'selected' : ''; ?>>Sent to Accounting</option>
+                        <option value="confirmed" <?php echo ($order_details['status'] ?? '') == 'confirmed' ? 'selected' : ''; ?>>Confirmed / Purchased</option>
+                        <?php if (($order_details['status'] ?? '') === 'ready_for_warehouse'): ?>
+                            <option value="ready_for_warehouse" selected>Paid, for Warehouse</option>
+                        <?php endif; ?>
+                        <?php if (($order_details['status'] ?? '') === 'delivered'): ?>
+                            <option value="delivered" selected>Received by Warehouse</option>
+                        <?php endif; ?>
+                        <option value="cancelled" <?php echo ($order_details['status'] ?? '') == 'cancelled' ? 'selected' : ''; ?>>Cancelled</option>
+                    </select>
+                    <?php if ($lockedStatus): ?>
+                        <input type="hidden" name="status" value="<?php echo htmlspecialchars($order_details['status']); ?>">
+                    <?php endif; ?>
+                <?php endif; ?>
             </div>
         </div>
         
@@ -415,7 +439,7 @@ include '../../includes/header.php';
             <input type="text" name="payment_terms" value="<?php echo htmlspecialchars($order_details['payment_terms'] ?? ''); ?>" placeholder="e.g., Net 30, COD">
         </div>
 
-        <h4 style="margin:1rem 0 0.5rem;">Materials from the purchase request</h4>
+        <h4 style="margin:1rem 0 0.5rem;">Materials on this PO number</h4>
         <p id="poPriceNote" style="color:#b45309;display:none;">These materials do not have a supplier unit price yet. Enter it in the price comparison, then accept the supplier.</p>
         <div class="table-responsive">
             <table class="table">
@@ -441,6 +465,14 @@ include '../../includes/header.php';
 function money(value) {
     return '₱' + Number(value || 0).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
 }
+const savedPoItems = <?php echo json_encode(array_map(static function ($item) {
+    return [
+        'name' => $item['material_name'] ?: 'Material',
+        'quantity' => (int) $item['quantity'],
+        'unit' => $item['unit'] ?? '',
+        'price' => $item['unit_price'] === null ? null : (float) $item['unit_price'],
+    ];
+}, $po_materials[(int) ($order_details['id'] ?? 0)] ?? []), JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP); ?>;
 function renderPoItems() {
     const select = document.getElementById('poRequest');
     const body = document.getElementById('poItemBody');
@@ -449,6 +481,9 @@ function renderPoItems() {
     const option = select.selectedOptions[0];
     let items = [];
     try { items = JSON.parse(option?.dataset.items || '[]'); } catch (e) { items = []; }
+    if (!items.length && savedPoItems.length) {
+        items = savedPoItems;
+    }
     body.textContent = '';
     const supplierName = document.getElementById('supplierName');
     const supplierContact = document.getElementById('supplierContact');
@@ -458,7 +493,7 @@ function renderPoItems() {
     if (supplierContact) {
         supplierContact.value = option?.dataset.contact || '';
     }
-    if (!option || !option.value || !items.length) {
+    if (!items.length) {
         const row = document.createElement('tr');
         const cell = document.createElement('td');
         cell.colSpan = 5;
@@ -500,7 +535,7 @@ renderPoItems();
         <div class="detail-row"><span>PO Number:</span> <strong><?php echo htmlspecialchars($order_details['po_number']); ?></strong></div>
         <div class="detail-row"><span>PR Number:</span> <?php echo htmlspecialchars($order_details['pr_number'] ?? 'N/A'); ?></div>
         <div class="detail-row"><span>Supplier:</span> <?php echo htmlspecialchars($order_details['supplier']); ?></div>
-        <div class="detail-row"><span>Supplier Contact:</span> <?php echo htmlspecialchars($order_details['supplier_contact'] ?? 'N/A'); ?></div>
+        <div class="detail-row"><span>Company Name:</span> <?php echo htmlspecialchars($order_details['supplier_contact'] ?? '') !== '' ? htmlspecialchars($order_details['supplier_contact']) : 'Company name not set'; ?></div>
         <div class="detail-row"><span>Status:</span> <span class="badge badge-<?php echo $order_details['status']; ?>"><?php echo ucfirst($order_details['status']); ?></span></div>
         <div class="detail-row"><span>Order Date:</span> <?php echo date('M d, Y', strtotime($order_details['order_date'])); ?></div>
         <div class="detail-row"><span>Delivery Date:</span> <?php echo $order_details['delivery_date'] ? date('M d, Y', strtotime($order_details['delivery_date'])) : 'N/A'; ?></div>
@@ -547,8 +582,10 @@ renderPoItems();
         <?php if (canWriteDepartmentData('procurement')): ?>
         <a href="?action=edit&id=<?php echo $order_details['id']; ?>" class="btn btn-warning"><i class="fas fa-edit"></i> Edit</a>
         <?php endif; ?>
-        <?php if (in_array($order_details['status'], ['sent', 'confirmed', 'ready_for_warehouse'], true)): ?>
+        <?php if ($order_details['status'] === 'ready_for_warehouse'): ?>
             <a href="<?php echo APP_URL; ?>modules/warehouse/receive_purchases.php?po=<?php echo (int) $order_details['id']; ?>" class="btn btn-primary"><i class="fas fa-truck-loading"></i> Receive in Warehouse</a>
+        <?php elseif (in_array($order_details['status'], ['sent', 'confirmed'], true)): ?>
+            <span class="badge badge-warning">Waiting for Accounting payment</span>
         <?php endif; ?>
         <?php if ($order_details['status'] === 'delivered'): ?>
             <a href="purchased_materials.php" class="btn btn-primary"><i class="fas fa-boxes"></i> Purchased Materials</a>
@@ -580,21 +617,20 @@ renderPoItems();
                 <?php else: ?>
                     <?php foreach ($orders as $order): ?>
                     <tr>
-                        <td><strong><?php echo htmlspecialchars($order['po_number']); ?></strong></td>
+                        <td>
+                            <strong><?php echo htmlspecialchars($order['po_number']); ?></strong>
+                            <?php foreach ($po_materials[(int) $order['id']] ?? [] as $line): ?>
+                                <div style="color:#64748b;font-size:0.8rem;"><?php echo htmlspecialchars(($line['material_name'] ?: 'Material') . ' × ' . (int) $line['quantity'] . ' ' . ($line['unit'] ?? '')); ?></div>
+                            <?php endforeach; ?>
+                        </td>
                         <td><?php echo htmlspecialchars($order['pr_number'] ?? 'N/A'); ?></td>
                         <td><?php echo htmlspecialchars($order['supplier']); ?></td>
                         <td><span class="badge badge-<?php echo $order['status']; ?>"><?php echo ucfirst($order['status']); ?></span></td>
                         <td><?php echo date('M d, Y', strtotime($order['created_at'])); ?></td>
                         <td>
                             <a href="?action=view&id=<?php echo $order['id']; ?>" class="btn btn-sm btn-info"><i class="fas fa-eye"></i></a>
-                            <?php if (canWriteDepartmentData('procurement')): ?>
+                            <?php if (canWriteDepartmentData('procurement') && !in_array($order['status'], ['ready_for_warehouse', 'delivered'], true)): ?>
                             <a href="?action=edit&id=<?php echo $order['id']; ?>" class="btn btn-sm btn-warning"><i class="fas fa-edit"></i></a>
-                            <?php if (in_array($order['status'], ['confirmed', 'sent'], true)): ?>
-                            <form method="POST" style="display:inline;">
-                                <input type="hidden" name="po_id" value="<?php echo (int)$order['id']; ?>">
-                                <button type="submit" name="mark_ready_warehouse" class="btn btn-sm btn-success">Send to Warehouse</button>
-                            </form>
-                            <?php endif; ?>
                             <?php endif; ?>
                         </td>
                     </tr>

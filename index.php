@@ -49,7 +49,7 @@ try {
     // Project Statistics
     $stats['active_projects'] = $pdo->query("SELECT COUNT(*) FROM projects WHERE status IN ('planning', 'ongoing')")->fetchColumn() ?? 0;
     $stats['total_project_amount'] = $pdo->query("SELECT COALESCE(SUM(estimated_budget), 0) FROM projects")->fetchColumn() ?? 0;
-    $stats['total_project_expenses'] = $pdo->query("SELECT COALESCE(SUM(amount), 0) FROM expenses WHERE status IN ('pending', 'paid')")->fetchColumn() ?? 0;
+    $stats['total_project_expenses'] = $pdo->query("SELECT COALESCE(SUM(actual_cost), 0) FROM v_project_costs")->fetchColumn() ?? 0;
     
     // Financial Statistics
     try {
@@ -247,7 +247,7 @@ try {
     // Project Overview
     try {
         $project_overview = $pdo->query("
-            SELECT p.id, p.project_code, p.name, p.status, p.location, p.client, p.start_date, p.end_date,
+            SELECT p.id, p.project_code, p.name, p.status, p.accounting_status, p.location, p.client, p.start_date, p.end_date,
                    p.estimated_budget, vpc.actual_cost, vpc.pending_cost, p.progress,
                    COALESCE(ua.full_name, ui.full_name) AS in_charge_name
             FROM projects p
@@ -260,7 +260,7 @@ try {
     } catch (PDOException $e) {
         try {
             $project_overview = $pdo->query("
-                SELECT p.id, p.project_code, p.name, p.status, p.location, p.client, p.start_date, p.end_date, p.estimated_budget, vpc.actual_cost, vpc.pending_cost, p.progress
+                SELECT p.id, p.project_code, p.name, p.status, p.accounting_status, p.location, p.client, p.start_date, p.end_date, p.estimated_budget, vpc.actual_cost, vpc.pending_cost, p.progress
                 FROM projects p
                 LEFT JOIN v_project_costs vpc ON vpc.project_id = p.id
                 ORDER BY created_at DESC
@@ -268,7 +268,7 @@ try {
             ")->fetchAll();
         } catch (PDOException $e2) {
             $project_overview = $pdo->query("
-                SELECT p.id, p.project_code, p.name, p.status, p.location, p.start_date, p.end_date, p.estimated_budget, vpc.actual_cost, vpc.pending_cost
+                SELECT p.id, p.project_code, p.name, p.status, p.accounting_status, p.location, p.start_date, p.end_date, p.estimated_budget, vpc.actual_cost, vpc.pending_cost
                 FROM projects p
                 LEFT JOIN v_project_costs vpc ON vpc.project_id = p.id
                 ORDER BY created_at DESC

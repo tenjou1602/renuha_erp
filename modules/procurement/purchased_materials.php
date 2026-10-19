@@ -59,7 +59,7 @@ $material_history = [];
 if ($action === 'view' && $id > 0) {
     try {
         $stmt = $pdo->prepare("
-            SELECT m.*, COALESCE(NULLIF(s.name, ''), NULLIF(m.supplier, '')) as supplier_name, s.contact_person, s.phone, s.email
+            SELECT m.*, COALESCE(NULLIF(s.name, ''), NULLIF(m.supplier, '')) as supplier_name, s.company_name, s.phone, s.email
             FROM materials m
             LEFT JOIN suppliers s ON m.supplier_id = s.id
             WHERE m.id = ?
@@ -157,7 +157,7 @@ include '../../includes/header.php';
         <div class="detail-row"><span>Min Stock:</span> <?php echo number_format($material_details['min_stock']); ?></div>
         <div class="detail-row"><span>Max Stock:</span> <?php echo number_format($material_details['max_stock']); ?></div>
         <div class="detail-row"><span>Supplier:</span> <?php echo htmlspecialchars($material_details['supplier_name'] ?? 'N/A'); ?></div>
-        <div class="detail-row"><span>Supplier Contact:</span> <?php echo htmlspecialchars($material_details['contact_person'] ?? 'N/A'); ?></div>
+        <div class="detail-row"><span>Company Name:</span> <?php echo htmlspecialchars($material_details['company_name'] ?? '') !== '' ? htmlspecialchars($material_details['company_name']) : 'Company name not set'; ?></div>
         <div class="detail-row"><span>Supplier Phone:</span> <?php echo htmlspecialchars($material_details['phone'] ?? 'N/A'); ?></div>
         <div class="detail-row"><span>Supplier Email:</span> <?php echo htmlspecialchars($material_details['email'] ?? 'N/A'); ?></div>
         <div class="detail-row"><span>Status:</span> <span class="badge badge-<?php echo $material_details['status'] == 'active' ? 'success' : 'secondary'; ?>"><?php echo ucfirst($material_details['status']); ?></span></div>

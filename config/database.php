@@ -367,6 +367,20 @@ function nullableDate($value): ?string {
     return $value;
 }
 
+function formatCompactMoney($amount): string
+{
+    $amount = (float) $amount;
+    $sign = $amount < 0 ? '-' : '';
+    $abs = abs($amount);
+    if ($abs >= 1000000000) {
+        return $sign . '₱' . rtrim(rtrim(number_format($abs / 1000000000, 1), '0'), '.') . 'B';
+    }
+    if ($abs >= 1000000) {
+        return $sign . '₱' . rtrim(rtrim(number_format($abs / 1000000, 1), '0'), '.') . 'M';
+    }
+    return $sign . '₱' . number_format($abs, 2);
+}
+
 function formatDisplayDate($value): string {
     $value = nullableDate($value);
     if ($value === null) {
@@ -389,6 +403,113 @@ function projectActualCostSql(string $projectRef = 'p.id'): string {
 
 function syncProjectActualCosts(): void {
     // Actual cost is calculated by v_project_costs. It is not written back to projects.
+}
+
+function budgetPosition(float $budget, float $actual, float $pending = 0): array
+{
+    $variance = $budget - $actual;
+    return [
+        'variance' => $variance,
+        'remaining_after_committed' => $budget - $actual - $pending,
+        'percent' => $budget > 0 ? ($variance / $budget) * 100 : null,
+        'label' => $variance < 0 ? 'Over budget' : 'Under budget',
+        'over' => $variance < 0,
+    ];
+}
+
+function accountingDecisionLabel(?string $status): string
+{
+    if ($status === 'rejected') {
+        return 'rejected';
+    }
+    if (in_array($status, ['received', 'quoted'], true)) {
+        return 'approved';
+    }
+    return 'pending';
+}
+
+function accountingDecisionView(string $decision): string
+{
+    $html = '<span style="display:inline-flex;gap:0.25rem;flex-wrap:wrap;">';
+    foreach (['pending' => ['Pending', 'btn-warning'], 'approved' => ['Approved', 'btn-success'], 'rejected' => ['Rejected', 'btn-danger']] as $value => $item) {
+        $on = $decision === $value;
+        $html .= '<span class="btn btn-sm ' . ($on ? $item[1] : 'btn-outline') . '"' . ($on ? '' : ' style="opacity:.45;"') . '>' . $item[0] . '</span>';
+    }
+    return $html . '</span>';
+}
+
+function recallUnreleasedAccountingHandoff(PDO $pdo, int $projectId): void
+{
+    $pdo->prepare("UPDATE material_requests SET flow_status = 'accounting' WHERE project_id = ? AND flow_status = 'warehouse' AND status = 'pending'")
+        ->execute([$projectId]);
+    $pdo->prepare("
+        UPDATE purchase_orders po
+        INNER JOIN purchase_requests pr ON pr.id = po.purchase_request_id
+        SET po.status = 'sent'
+        WHERE pr.project_id = ? AND po.status = 'ready_for_warehouse' AND po.received_at IS NULL
+    ")->execute([$projectId]);
+}
+
+function setAccountingProjectDecision(PDO $pdo, int $projectId, string $decision): string
+{
+    if ($projectId <= 0 || !in_array($decision, ['pending', 'approved', 'rejected'], true)) {
+        throw new RuntimeException('Choose Pending, Approved, or Rejected.');
+    }
+
+    if ($decision === 'approved') {
+        $stmt = $pdo->prepare("UPDATE projects SET accounting_received_at = COALESCE(accounting_received_at, NOW()), accounting_status = 'received' WHERE id = ? AND accounting_status <> 'received'");
+        $stmt->execute([$projectId]);
+        if ($stmt->rowCount() < 1) {
+            return 'This project is already approved.';
+        }
+        $pdo->prepare("UPDATE material_requests SET flow_status = 'warehouse' WHERE project_id = ? AND flow_status = 'accounting'")->execute([$projectId]);
+        $pdo->prepare("UPDATE purchase_orders po INNER JOIN purchase_requests pr ON pr.id = po.purchase_request_id SET po.status = 'ready_for_warehouse' WHERE pr.project_id = ? AND po.status IN ('sent', 'confirmed')")->execute([$projectId]);
+        notifyAccountingReceived($projectId);
+        return 'Project approved. Warehouse can release materials that are already in stock.';
+    }
+
+    if ($decision === 'rejected') {
+        $stmt = $pdo->prepare("UPDATE projects SET accounting_status = 'rejected' WHERE id = ? AND accounting_status <> 'rejected'");
+        $stmt->execute([$projectId]);
+        recallUnreleasedAccountingHandoff($pdo, $projectId);
+        if ($stmt->rowCount() < 1) {
+            return 'This project is already rejected.';
+        }
+        notifyProjectRejected($projectId);
+        return 'Project rejected. Unreleased materials were returned to Accounting.';
+    }
+
+    $stmt = $pdo->prepare("UPDATE projects SET accounting_status = 'pending', accounting_received_at = NULL WHERE id = ?");
+    $stmt->execute([$projectId]);
+    $check = $pdo->prepare("SELECT accounting_status FROM projects WHERE id = ?");
+    $check->execute([$projectId]);
+    if ((string) $check->fetchColumn() !== 'pending') {
+        throw new RuntimeException('The project could not be set back to pending.');
+    }
+    recallUnreleasedAccountingHandoff($pdo, $projectId);
+    return 'Project set back to pending.';
+}
+
+function syncDepartmentWorkflow(PDO $pdo): void
+{
+    static $ran = false;
+    if ($ran) {
+        return;
+    }
+    $ran = true;
+    $root = dirname(__DIR__);
+    if (!function_exists('syncPurchasedMaterialsToAccounting')) {
+        require_once $root . '/includes/accounting_ledger.php';
+    }
+    if (!function_exists('syncReceivedOrdersForRelease')) {
+        require_once $root . '/includes/warehouse_release.php';
+    }
+    syncPurchasedMaterialsToAccounting($pdo);
+    try {
+        syncReceivedOrdersForRelease($pdo);
+    } catch (Throwable $e) {
+        error_log('[Runeha ERP] release sync: ' . $e->getMessage());
+    }
 }
 
 require_once __DIR__ . '/../includes/notifications.php';

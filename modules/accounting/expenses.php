@@ -77,7 +77,56 @@ if (isset($_GET['delete_id']) && $action === 'delete') {
     exit();
 }
 
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mark_paid'])) {
+    if (!canWriteDepartmentData('accounting')) {
+        $_SESSION['error'] = 'Only Accounting can mark an expense as paid.';
+        header('Location: expenses.php');
+        exit();
+    }
+    $paidId = (int) ($_POST['expense_id'] ?? 0);
+    $method = trim($_POST['payment_method'] ?? '');
+    $reference = trim($_POST['reference_number'] ?? '');
+    $stmt = $pdo->prepare("UPDATE expenses SET status = 'paid', paid_by = ?, paid_at = NOW(), payment_method = COALESCE(NULLIF(?, ''), payment_method), reference_number = COALESCE(NULLIF(?, ''), reference_number) WHERE id = ? AND status = 'pending'");
+    $stmt->execute([(int) $_SESSION['user_id'], $method, $reference, $paidId]);
+    if ($stmt->rowCount() === 1) {
+        releasePaidOrderToWarehouse($pdo, $paidId);
+        $_SESSION['success'] = 'Expense marked as paid. Warehouse can now receive the materials on this purchase order.';
+    } else {
+        $_SESSION['error'] = 'Only a pending expense can be marked as paid.';
+    }
+    header('Location: expenses.php?action=view&id=' . $paidId);
+    exit();
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['reopen_expense'])) {
+    if (!isManager() || ($_SESSION['department'] ?? '') !== 'accounting') {
+        $_SESSION['error'] = 'Only an Accounting manager can return a paid expense to pending.';
+        header('Location: expenses.php');
+        exit();
+    }
+    $paidId = (int) ($_POST['expense_id'] ?? 0);
+    $reason = trim($_POST['status_note'] ?? '');
+    if ($reason === '') {
+        $_SESSION['error'] = 'A reason is required to return a paid expense to pending.';
+        header('Location: expenses.php?action=view&id=' . $paidId);
+        exit();
+    }
+    $stmt = $pdo->prepare("UPDATE expenses SET status = 'pending', status_note = ?, paid_by = NULL, paid_at = NULL WHERE id = ? AND status = 'paid'");
+    $stmt->execute([mb_substr($reason, 0, 500), $paidId]);
+    if ($stmt->rowCount() === 1) {
+        holdUnreceivedOrderForPayment($pdo, $paidId);
+    }
+    logActivity($_SESSION['user_id'], 'Reopened expense', 'Accounting', 'Expense ' . $paidId . ': ' . $reason);
+    $_SESSION['success'] = $stmt->rowCount() === 1 ? 'Expense returned to pending.' : 'That expense is not paid.';
+    header('Location: expenses.php?action=view&id=' . $paidId);
+    exit();
+}
+
 syncPurchasedMaterialsToAccounting($pdo);
+$status_filter = $_GET['status'] ?? '';
+if (!in_array($status_filter, ['pending', 'paid', 'cancelled'], true)) {
+    $status_filter = '';
+}
 
 // Get projects for dropdown
 $projects = $pdo->query("SELECT id, name, project_code FROM projects ORDER BY name")->fetchAll();
@@ -90,6 +139,7 @@ try {
         FROM expenses e
         LEFT JOIN projects p ON e.project_id = p.id
         LEFT JOIN users u ON e.created_by = u.id
+        " . ($status_filter !== '' ? "WHERE e.status = " . $pdo->quote($status_filter) : '') . "
         ORDER BY e.created_at DESC
     ";
     $expenses = $pdo->query($query)->fetchAll();
@@ -130,6 +180,9 @@ include '../../includes/header.php';
 
 <?php if (isset($_SESSION['success'])): ?>
     <div class="alert alert-success"><?php echo htmlspecialchars($_SESSION['success']); unset($_SESSION['success']); ?></div>
+<?php endif; ?>
+<?php if (isset($_SESSION['error'])): ?>
+    <div class="alert alert-danger"><?php echo htmlspecialchars($_SESSION['error']); unset($_SESSION['error']); ?></div>
 <?php endif; ?>
 <?php if (isset($error)): ?>
     <div class="alert alert-danger"><?php echo htmlspecialchars($error); ?></div>
@@ -229,17 +282,55 @@ include '../../includes/header.php';
         <div class="detail-row"><span>Category:</span> <?php echo htmlspecialchars($expense_details['category']); ?></div>
         <div class="detail-row"><span>Amount:</span> <strong>₱<?php echo number_format($expense_details['amount'], 2); ?></strong></div>
         <div class="detail-row"><span>Project:</span> <?php echo htmlspecialchars($expense_details['project_name'] ?? 'N/A'); ?></div>
-        <div class="detail-row"><span>Status:</span> <span class="badge badge-<?php echo $expense_details['status']; ?>"><?php echo ucfirst($expense_details['status']); ?></span></div>
+        <div class="detail-row"><span>Status:</span> <span class="badge badge-<?php echo $expense_details['status'] === 'paid' ? 'success' : ($expense_details['status'] === 'pending' ? 'warning' : 'secondary'); ?>"><?php echo ucfirst($expense_details['status']); ?></span></div>
+        <?php if (!empty($expense_details['paid_at'])): ?>
+        <div class="detail-row"><span>Paid at:</span> <?php echo date('M d, Y h:i A', strtotime($expense_details['paid_at'])); ?></div>
+        <?php endif; ?>
+        <?php if (!empty($expense_details['status_note'])): ?>
+        <div class="detail-row"><span>Status note:</span> <?php echo htmlspecialchars($expense_details['status_note']); ?></div>
+        <?php endif; ?>
         <div class="detail-row"><span>Expense Date:</span> <?php echo date('M d, Y', strtotime($expense_details['expense_date'])); ?></div>
         <div class="detail-row"><span>Payment Method:</span> <?php echo htmlspecialchars($expense_details['payment_method'] ?? 'N/A'); ?></div>
         <div class="detail-row"><span>Reference #:</span> <?php echo htmlspecialchars($expense_details['reference_number'] ?? 'N/A'); ?></div>
+        <?php if (!empty($expense_details['purchase_order_id'])): ?>
+            <?php $payLines = purchaseOrderMaterialsByOrder($pdo)[(int) $expense_details['purchase_order_id']] ?? []; ?>
+            <?php if ($payLines): ?>
+            <div class="table-responsive" style="margin-top:1rem;">
+                <table class="table">
+                    <thead><tr><th>Material on <?php echo htmlspecialchars($expense_details['reference_number'] ?: 'this PO'); ?></th><th>Qty</th><th>Unit price</th><th>Amount</th></tr></thead>
+                    <tbody>
+                        <?php foreach ($payLines as $line): ?>
+                        <tr>
+                            <td><?php echo htmlspecialchars($line['material_name'] ?: 'Material'); ?></td>
+                            <td><?php echo (int) $line['quantity']; ?> <?php echo htmlspecialchars($line['unit'] ?? ''); ?></td>
+                            <td>₱<?php echo number_format((float) $line['unit_price'], 2); ?></td>
+                            <td>₱<?php echo number_format((float) $line['quantity'] * (float) $line['unit_price'], 2); ?></td>
+                        </tr>
+                        <?php endforeach; ?>
+                    </tbody>
+                </table>
+            </div>
+            <?php endif; ?>
+        <?php endif; ?>
         <div class="detail-row"><span>Description:</span> <?php echo nl2br(htmlspecialchars($expense_details['description'] ?? '')); ?></div>
         <div class="detail-row"><span>Created By:</span> <?php echo htmlspecialchars($expense_details['created_by_name'] ?? 'N/A'); ?></div>
         <div class="detail-row"><span>Created:</span> <?php echo date('M d, Y h:i A', strtotime($expense_details['created_at'])); ?></div>
     </div>
     <div class="table-actions">
-        <?php if ($expense_details['status'] === 'pending'): ?>
-            <?php if (canWriteDepartmentData('accounting')): ?><a href="?action=edit&id=<?php echo $expense_details['id']; ?>" class="btn btn-warning"><i class="fas fa-edit"></i> Edit</a><?php endif; ?>
+        <?php if ($expense_details['status'] === 'pending' && canWriteDepartmentData('accounting')): ?>
+            <a href="?action=edit&id=<?php echo $expense_details['id']; ?>" class="btn btn-warning"><i class="fas fa-edit"></i> Edit</a>
+            <form method="POST" style="display:inline;" onsubmit="return confirm('Mark this expense as paid? This records you as the person who paid it.');">
+                <input type="hidden" name="mark_paid" value="1">
+                <input type="hidden" name="expense_id" value="<?php echo (int) $expense_details['id']; ?>">
+                <button type="submit" class="btn btn-success">Mark as Paid</button>
+            </form>
+        <?php elseif ($expense_details['status'] === 'paid' && isManager() && ($_SESSION['department'] ?? '') === 'accounting'): ?>
+            <form method="POST" style="display:inline-flex;gap:.4rem;align-items:center;" onsubmit="return confirm('Return this paid expense to pending?');">
+                <input type="hidden" name="reopen_expense" value="1">
+                <input type="hidden" name="expense_id" value="<?php echo (int) $expense_details['id']; ?>">
+                <input type="text" name="status_note" required placeholder="Reason" style="max-width:220px;">
+                <button type="submit" class="btn btn-warning">Return to Pending</button>
+            </form>
         <?php endif; ?>
         <a href="expenses.php" class="btn btn-secondary"><i class="fas fa-arrow-left"></i> Back</a>
     </div>
@@ -248,6 +339,15 @@ include '../../includes/header.php';
 <?php else: ?>
 <!-- List View -->
 <div class="card">
+    <form method="GET" style="margin-bottom:.8rem;display:flex;gap:.5rem;align-items:center;">
+        <label for="statusFilter">Status</label>
+        <select id="statusFilter" name="status" onchange="this.form.submit()">
+            <option value="">All</option>
+            <?php foreach (['pending' => 'Pending', 'paid' => 'Paid', 'cancelled' => 'Cancelled'] as $value => $label): ?>
+            <option value="<?php echo $value; ?>" <?php echo $status_filter === $value ? 'selected' : ''; ?>><?php echo $label; ?></option>
+            <?php endforeach; ?>
+        </select>
+    </form>
     <div class="table-responsive">
         <table class="table" id="expenseTable">
             <thead>
@@ -273,7 +373,7 @@ include '../../includes/header.php';
                         <td><?php echo htmlspecialchars($exp['category']); ?></td>
                         <td><?php echo htmlspecialchars($exp['project_name'] ?? 'N/A'); ?></td>
                         <td>₱<?php echo number_format($exp['amount'], 2); ?></td>
-                        <td><span class="badge badge-<?php echo $exp['status']; ?>"><?php echo ucfirst($exp['status']); ?></span></td>
+                        <td><span class="badge badge-<?php echo $exp['status'] === 'paid' ? 'success' : ($exp['status'] === 'pending' ? 'warning' : 'secondary'); ?>"><?php echo ucfirst($exp['status']); ?></span></td>
                         <td><?php echo date('M d, Y', strtotime($exp['created_at'])); ?></td>
                         <td>
                             <a href="?action=view&id=<?php echo $exp['id']; ?>" class="btn btn-sm btn-info"><i class="fas fa-eye"></i></a>

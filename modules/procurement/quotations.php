@@ -89,11 +89,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $pdo->prepare("UPDATE quotations SET status = 'rejected' WHERE purchase_request_id = ? AND id <> ? AND status <> 'rejected'")->execute([$purchase_request_id, $quoteId]);
                     $pdo->prepare("UPDATE purchase_requests SET status = 'confirmed', confirmed_by = ?, confirmed_at = NOW() WHERE id = ? AND status IN ('pending', 'approved')")->execute([$_SESSION['user_id'], $purchase_request_id]);
                 }
-                logActivity($_SESSION['user_id'], isset($_POST['add_quotation']) ? 'Created quotation' : 'Updated quotation', 'Procurement', "QT: $quotation_number");
-                $_SESSION['success'] = $status === 'accepted'
-                    ? 'Supplier accepted. Next: create the purchase order.'
-                    : 'Supplier price saved. Set the status to Accepted when this is the supplier you will buy from.';
-                header('Location: ' . ($status === 'accepted' ? 'purchase_orders.php?action=add&quote=' . $quoteId : 'quotations.php'));
+                if (isset($_POST['submit_to_accounting'])) {
+                    $pdo->prepare("UPDATE quotations SET submitted_to_accounting_at = NOW() WHERE id = ?")->execute([$quoteId]);
+                    notify(
+                        'accounting',
+                        'supplier_quotation',
+                        'Supplier quotation',
+                        $quotation_number . ' was submitted by Procurement.',
+                        'modules/accounting/supplier_quotations.php?action=view&id=' . $quoteId,
+                        $project_id ? (int) $project_id : null,
+                        'quotation',
+                        $quoteId
+                    );
+                }
+                logActivity($_SESSION['user_id'], isset($_POST['submit_to_accounting']) ? 'Submitted quotation to accounting' : (isset($_POST['add_quotation']) ? 'Created quotation' : 'Updated quotation'), 'Procurement', "QT: $quotation_number");
+                if (isset($_POST['submit_to_accounting'])) {
+                    $_SESSION['success'] = 'Quotation sent to Accounting.';
+                    header('Location: quotations.php');
+                } else {
+                    $_SESSION['success'] = $status === 'accepted'
+                        ? 'Supplier accepted. Next: create the purchase order.'
+                        : 'Supplier price saved. Set the status to Accepted when this is the supplier you will buy from.';
+                    header('Location: ' . ($status === 'accepted' ? 'purchase_orders.php?action=add&quote=' . $quoteId : 'quotations.php'));
+                }
                 exit();
             } catch (PDOException $e) {
                 if ($pdo->inTransaction()) {
@@ -113,7 +131,7 @@ $purchase_requests = [];
 $suppliers = [];
 try {
     $purchase_requests = $pdo->query("SELECT id, pr_number, project_id, purpose, status FROM purchase_requests WHERE status IN ('approved', 'confirmed', 'ordered') ORDER BY created_at DESC")->fetchAll();
-    $suppliers = $pdo->query("SELECT id, name, contact_person FROM suppliers WHERE status = 'active' ORDER BY name")->fetchAll();
+    $suppliers = $pdo->query("SELECT id, name, company_name, phone, email, address, tin_number FROM suppliers WHERE status = 'active' ORDER BY name")->fetchAll();
 } catch (PDOException $e) {
     $purchase_requests = [];
     $suppliers = [];
@@ -123,7 +141,16 @@ try {
 $quotations = [];
 try {
     $query = "
-        SELECT q.*, p.name as project_name, p.project_code, u.full_name as created_by_name
+        SELECT q.*, p.name as project_name, p.project_code, u.full_name as created_by_name,
+               (
+                   SELECT e.status
+                   FROM purchase_orders po
+                   INNER JOIN expenses e ON e.purchase_order_id = po.id
+                   WHERE po.purchase_request_id = q.purchase_request_id
+                     AND po.status <> 'cancelled'
+                   ORDER BY e.id DESC
+                   LIMIT 1
+               ) AS payment_status
         FROM quotations q
         LEFT JOIN projects p ON q.project_id = p.id
         LEFT JOIN users u ON q.created_by = u.id
@@ -221,7 +248,7 @@ include '../../includes/header.php';
 <?php if ($action === 'add' || $action === 'edit'): ?>
 <!-- Add/Edit Form -->
 <div class="card">
-    <h3><?php echo $action === 'add' ? 'Create New' : 'Edit'; ?> Quotation</h3>
+    <h3>Update Quotation</h3>
     <form method="POST">
         <?php if ($action === 'edit'): ?>
             <input type="hidden" name="update_quotation" value="1">
@@ -274,8 +301,8 @@ include '../../includes/header.php';
                         $is_current = strcasecmp($current_supplier, $supplier_row['name']) === 0;
                         $supplier_known = $supplier_known || $is_current;
                     ?>
-                        <option value="<?php echo htmlspecialchars($supplier_row['name']); ?>" data-contact="<?php echo htmlspecialchars($supplier_row['contact_person'] ?? ''); ?>" <?php echo $is_current ? 'selected' : ''; ?>>
-                            <?php echo htmlspecialchars($supplier_row['name']); ?>
+                        <option value="<?php echo htmlspecialchars($supplier_row['name']); ?>" data-company="<?php echo htmlspecialchars($supplier_row['company_name'] ?? ''); ?>" data-phone="<?php echo htmlspecialchars($supplier_row['phone'] ?? ''); ?>" data-email="<?php echo htmlspecialchars($supplier_row['email'] ?? ''); ?>" data-address="<?php echo htmlspecialchars($supplier_row['address'] ?? ''); ?>" data-tin="<?php echo htmlspecialchars($supplier_row['tin_number'] ?? ''); ?>" <?php echo $is_current ? 'selected' : ''; ?>>
+                            <?php echo htmlspecialchars(($supplier_row['company_name'] ?? '') !== '' ? $supplier_row['company_name'] : ('Company name not set — ' . $supplier_row['name'])); ?>
                         </option>
                     <?php endforeach; ?>
                     <?php if ($current_supplier !== '' && !$supplier_known): ?>
@@ -284,9 +311,17 @@ include '../../includes/header.php';
                 </select>
             </div>
             <div class="form-group">
-                <label>Supplier Contact</label>
-                <input type="text" name="supplier_contact" value="<?php echo htmlspecialchars($quotation_details['supplier_contact'] ?? ''); ?>">
+                <label>Company Name</label>
+                <input type="text" name="supplier_contact" id="supplierCompany" readonly value="<?php echo htmlspecialchars($quotation_details['supplier_contact'] ?? ''); ?>" placeholder="Company name not set">
             </div>
+        </div>
+        <div class="form-row">
+            <div class="form-group"><label>Phone</label><input type="text" id="supplierPhone" readonly></div>
+            <div class="form-group"><label>Email</label><input type="text" id="supplierEmail" readonly></div>
+        </div>
+        <div class="form-row">
+            <div class="form-group"><label>Address</label><input type="text" id="supplierAddress" readonly></div>
+            <div class="form-group"><label>TIN</label><input type="text" id="supplierTin" readonly></div>
         </div>
         
         <div class="form-row">
@@ -330,7 +365,8 @@ include '../../includes/header.php';
         </div>
         
         <div style="margin-top:1.5rem;">
-            <button type="submit" class="btn btn-primary"><i class="fas fa-save"></i> <?php echo $action === 'add' ? 'Create' : 'Update'; ?> Quotation</button>
+            <button type="submit" class="btn btn-primary"><i class="fas fa-save"></i> Update Quotation</button>
+            <button type="submit" name="submit_to_accounting" value="1" class="btn btn-success" onclick="return confirm('Send this quotation to Accounting?');"><i class="fas fa-paper-plane"></i> Submit to Accounting</button>
             <a href="quotations.php" class="btn btn-secondary">Cancel</a>
         </div>
     </form>
@@ -344,11 +380,14 @@ document.getElementById('purchaseRequest')?.addEventListener('change', function 
     }
 });
 document.getElementById('supplierSelect')?.addEventListener('change', function () {
-    const contact = this.selectedOptions[0]?.dataset.contact || '';
-    const contactInput = document.querySelector('[name="supplier_contact"]');
-    if (contactInput && contact) {
-        contactInput.value = contact;
-    }
+    const selected = this.selectedOptions[0];
+    const company = document.getElementById('supplierCompany');
+    if (company) company.value = selected?.dataset.company || '';
+    const map = { supplierPhone: 'phone', supplierEmail: 'email', supplierAddress: 'address', supplierTin: 'tin' };
+    Object.keys(map).forEach(function (id) {
+        const input = document.getElementById(id);
+        if (input) input.value = selected?.dataset[map[id]] || '';
+    });
 });
 const quoteMaterials = <?php echo json_encode($quote_materials, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP); ?>;
 const savedPrices = <?php echo json_encode($saved_prices, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP); ?>;
@@ -417,8 +456,18 @@ renderQuoteItems();
         <div class="detail-row"><span>Purchase Request:</span> <?php echo htmlspecialchars($quotation_details['pr_number'] ?? 'N/A'); ?></div>
         <div class="detail-row"><span>Project:</span> <?php echo htmlspecialchars($quotation_details['project_name'] ?? 'N/A'); ?></div>
         <div class="detail-row"><span>Supplier:</span> <?php echo htmlspecialchars($quotation_details['supplier']); ?></div>
-        <div class="detail-row"><span>Supplier Contact:</span> <?php echo htmlspecialchars($quotation_details['supplier_contact'] ?? 'N/A'); ?></div>
-        <div class="detail-row"><span>Status:</span> <span class="badge badge-<?php echo $quotation_details['status']; ?>"><?php echo ucfirst($quotation_details['status']); ?></span></div>
+        <div class="detail-row"><span>Company Name:</span> <?php echo htmlspecialchars($quotation_details['supplier_contact'] ?? '') !== '' ? htmlspecialchars($quotation_details['supplier_contact']) : 'Company name not set'; ?></div>
+        <div class="detail-row"><span>Status:</span> <span class="badge badge-<?php echo $quotation_details['status']; ?>"><?php echo ucfirst($quotation_details['status']); ?></span>
+            <?php
+            $detailPayment = '';
+            if (!empty($quotation_details['submitted_to_accounting_at']) && !empty($quotation_details['purchase_request_id'])) {
+                $payStmt = $pdo->prepare("SELECT e.status FROM purchase_orders po INNER JOIN expenses e ON e.purchase_order_id = po.id WHERE po.purchase_request_id = ? AND po.status <> 'cancelled' ORDER BY e.id DESC LIMIT 1");
+                $payStmt->execute([(int) $quotation_details['purchase_request_id']]);
+                $detailPayment = (string) $payStmt->fetchColumn();
+                echo $detailPayment === 'paid' ? ' <span class="badge badge-success">Paid</span>' : ' <span class="badge badge-warning">Pending</span>';
+            }
+            ?>
+        </div>
         <div class="detail-row"><span>Valid Until:</span> <?php echo $quotation_details['valid_until'] ? date('M d, Y', strtotime($quotation_details['valid_until'])) : 'N/A'; ?></div>
         <?php
         $quote_lines = [];
@@ -494,7 +543,16 @@ renderQuoteItems();
                         <td><?php echo htmlspecialchars($qt['project_name'] ?? 'N/A'); ?></td>
                         <td><?php echo htmlspecialchars($qt['supplier']); ?></td>
                         <td>₱<?php echo number_format((float) ($qt['total_amount'] ?? 0), 2); ?></td>
-                        <td><span class="badge badge-<?php echo $qt['status']; ?>"><?php echo ucfirst($qt['status']); ?></span></td>
+                        <td>
+                            <span class="badge badge-<?php echo $qt['status']; ?>"><?php echo ucfirst($qt['status']); ?></span>
+                            <?php if (!empty($qt['submitted_to_accounting_at'])): ?>
+                                <?php if (($qt['payment_status'] ?? '') === 'paid'): ?>
+                                    <span class="badge badge-success">Paid</span>
+                                <?php else: ?>
+                                    <span class="badge badge-warning">Pending</span>
+                                <?php endif; ?>
+                            <?php endif; ?>
+                        </td>
                         <td><?php echo $qt['valid_until'] ? date('M d, Y', strtotime($qt['valid_until'])) : 'N/A'; ?></td>
                         <td>
                             <a href="?action=view&id=<?php echo $qt['id']; ?>" class="btn btn-sm btn-info"><i class="fas fa-eye"></i></a>

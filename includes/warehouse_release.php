@@ -143,20 +143,26 @@ function syncReceivedOrdersForRelease(PDO $pdo): void
           AND NOT EXISTS (
               SELECT 1 FROM material_requests mr WHERE mr.purchase_order_item_id = poi.id
           )
+          AND NOT EXISTS (
+              SELECT 1 FROM material_requests mr
+              WHERE mr.project_id = pr.project_id
+                AND mr.material_id = poi.material_id
+                AND mr.purchase_request_id = pr.id
+          )
     ")->fetchAll();
     if (!$rows) {
         return;
     }
     $insert = $pdo->prepare("INSERT INTO material_requests
-        (project_id, material_id, quantity, request_date, status, requested_by, notes, purchase_request_id, purchase_order_item_id)
-        VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?)");
+        (project_id, material_id, quantity, request_date, status, flow_status, requested_by, notes, purchase_request_id, purchase_order_item_id)
+        VALUES (?, ?, ?, ?, 'pending', 'warehouse', ?, ?, ?, ?)");
     foreach ($rows as $row) {
         $engineerId = (int) ($row['requestor_id'] ?: $row['created_by']);
         $qty = (int) $row['received_qty'];
         if ($engineerId <= 0 || $qty <= 0) {
             continue;
         }
-        $notes = 'Request ni Engineering ' . $row['pr_number'] . ', na-order at natanggap sa ' . $row['po_number'] . '.';
+        $notes = 'Engineering request ' . $row['pr_number'] . ', ordered and received on ' . $row['po_number'] . '.';
         $insert->execute([
             (int) $row['project_id'],
             (int) $row['material_id'],

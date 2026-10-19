@@ -25,29 +25,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $name = trim($_POST['name'] ?? '');
         $description = trim($_POST['description'] ?? '');
         $category = trim($_POST['category'] ?? '');
+        $allowed_units = ['pcs', 'no/s', 'lot', 'm', 'set/s', 'kg', 'box', 'roll'];
         $unit = trim($_POST['unit'] ?? 'pcs');
         $cost_per_unit = (float)($_POST['cost_per_unit'] ?? 0);
-        $min_stock = (int)($_POST['min_stock'] ?? 0);
+        $min_stock = (int)($_POST['min_stock'] ?? 1);
         $max_stock = (int)($_POST['max_stock'] ?? 0);
         $current_stock = (int)($_POST['current_stock'] ?? 0);
         $supplier = trim($_POST['supplier'] ?? '');
         $status = $_POST['status'] ?? 'active';
         
         $errors = [];
-        if (empty($name)) $errors[] = 'Material name is required.';
+        if (empty($name) || mb_strlen($name) < 2) $errors[] = 'Material name is required.';
+        if ($category === '') $errors[] = 'Category is required.';
+        if (!in_array($unit, $allowed_units, true)) $errors[] = 'Select a unit from the list.';
+        if ($min_stock < 1) $errors[] = 'Minimum stock must be greater than 0.';
         if ($cost_per_unit < 0) $errors[] = 'Cost per unit must be positive.';
         
         if (empty($errors)) {
             try {
                 if (isset($_POST['add_material'])) {
-                    $stmt = $pdo->prepare("INSERT INTO materials (material_code, name, description, category, unit, cost_per_unit, min_stock, max_stock, current_stock, supplier, status, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-                    $stmt->execute([$material_code, $name, $description, $category, $unit, $cost_per_unit, $min_stock, $max_stock, $current_stock, $supplier, $status, $_SESSION['user_id']]);
+                    $stmt = $pdo->prepare("INSERT INTO materials (material_code, name, description, category, unit, cost_per_unit, min_stock, max_stock, current_stock, supplier, status, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)");
+                    $stmt->execute([$material_code, $name, $description, $category, $unit, $cost_per_unit, $min_stock, $max_stock, $supplier, $status, $_SESSION['user_id']]);
                     
                     logActivity($_SESSION['user_id'], 'Created material', 'Procurement', "Material: $material_code");
                     $_SESSION['success'] = "Material created successfully!";
                 } else {
-                    $stmt = $pdo->prepare("UPDATE materials SET name = ?, description = ?, category = ?, unit = ?, cost_per_unit = ?, min_stock = ?, max_stock = ?, current_stock = ?, supplier = ?, status = ? WHERE id = ?");
-                    $stmt->execute([$name, $description, $category, $unit, $cost_per_unit, $min_stock, $max_stock, $current_stock, $supplier, $status, $id]);
+                    $stmt = $pdo->prepare("UPDATE materials SET name = ?, description = ?, category = ?, unit = ?, cost_per_unit = ?, min_stock = ?, max_stock = ?, supplier = ?, status = ? WHERE id = ?");
+                    $stmt->execute([$name, $description, $category, $unit, $cost_per_unit, $min_stock, $max_stock, $supplier, $status, $id]);
                     
                     logActivity($_SESSION['user_id'], 'Updated material', 'Procurement', "Material: $material_code");
                     $_SESSION['success'] = "Material updated successfully!";
@@ -57,6 +61,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             } catch (PDOException $e) {
                 $error = userDatabaseError($e);
             }
+        } else {
+            $error = implode(' ', $errors);
         }
     }
 }
@@ -130,12 +136,16 @@ include '../../includes/header.php';
         
         <div class="form-row">
             <div class="form-group">
-                <label>Category</label>
-                <input type="text" name="category" value="<?php echo htmlspecialchars($material_details['category'] ?? ''); ?>">
+                <label class="required">Category</label>
+                <input type="text" name="category" required value="<?php echo htmlspecialchars($material_details['category'] ?? ''); ?>">
             </div>
             <div class="form-group">
-                <label>Unit</label>
-                <input type="text" name="unit" value="<?php echo htmlspecialchars($material_details['unit'] ?? 'pcs'); ?>">
+                <label class="required">Unit</label>
+                <select name="unit" required>
+                    <?php foreach (['pcs', 'no/s', 'lot', 'm', 'set/s', 'kg', 'box', 'roll'] as $unitOption): ?>
+                        <option value="<?php echo $unitOption; ?>" <?php echo ($material_details['unit'] ?? 'pcs') === $unitOption ? 'selected' : ''; ?>><?php echo $unitOption; ?></option>
+                    <?php endforeach; ?>
+                </select>
             </div>
         </div>
         
@@ -146,14 +156,14 @@ include '../../includes/header.php';
             </div>
             <div class="form-group">
                 <label>Current Stock</label>
-                <input type="number" name="current_stock" value="<?php echo $material_details['current_stock'] ?? 0; ?>" min="0">
+                <input type="number" value="<?php echo $material_details['current_stock'] ?? 0; ?>" readonly>
             </div>
         </div>
         
         <div class="form-row">
             <div class="form-group">
-                <label>Min Stock</label>
-                <input type="number" name="min_stock" value="<?php echo $material_details['min_stock'] ?? 0; ?>" min="0">
+                <label class="required">Minimum Stock</label>
+                <input type="number" name="min_stock" required value="<?php echo (int) ($material_details['min_stock'] ?? 1) > 0 ? (int) $material_details['min_stock'] : 1; ?>" min="1">
             </div>
             <div class="form-group">
                 <label>Max Stock</label>

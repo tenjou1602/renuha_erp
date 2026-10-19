@@ -1222,13 +1222,14 @@ body {
 .dept-head h1 i { color: #94a3b8; margin-right: 0.35rem; }
 .dept-sub { color: #64748b; margin: 0.3rem 0 0; font-size: 0.9rem; }
 .dept-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
-.dept-kpis {
+.dept-kpis, .exec-kpis {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 0.9rem;
     margin-bottom: 1rem;
 }
 .dept-kpi {
+    min-width: 0;
     background: #fff;
     border-radius: 16px;
     padding: 1rem 1.1rem;
@@ -1251,13 +1252,17 @@ body {
     font-size: 1.05rem;
     flex-shrink: 0;
 }
-.dept-kpi .num {
-    font-size: clamp(0.95rem, 1.4vw, 1.45rem);
+.dept-kpi .num, .exec-kpi .num {
+    font-size: clamp(1.1rem, 1.6vw, 1.5rem);
     font-weight: 800;
     line-height: 1.2;
     white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 100%;
     font-variant-numeric: tabular-nums;
 }
+.dept-kpi > div:last-child, .exec-kpi > div:last-child { min-width: 0; }
 .acct-kpis {
     grid-template-columns: repeat(3, minmax(0, 1fr));
 }
@@ -1270,7 +1275,7 @@ body {
 .notif-item.unread { background: #eff6ff; }
 .notif-item small, .notif-empty { color: #64748b; }
 .notif-empty { padding: 1rem; }
-.chart-compact { position: relative; width: 100%; max-width: 720px; height: 280px; max-height: 300px; }
+.chart-compact { position: relative; width: 100%; max-width: 100%; height: 280px; max-height: 300px; }
 .funds-layout { display: grid; grid-template-columns: 280px 1fr; gap: 1.5rem; align-items: center; }
 .funds-chart-box { position: relative; width: 280px; height: 280px; max-width: 100%; }
 .funds-center { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-weight: 800; pointer-events: none; }
@@ -1279,11 +1284,8 @@ body {
     .funds-layout { grid-template-columns: 1fr; }
     .funds-chart-box { margin: 0 auto; }
 }
-@media (max-width: 1100px) {
-    .acct-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-}
-@media (max-width: 640px) {
-    .acct-kpis { grid-template-columns: 1fr; }
+@media (max-width: 720px) {
+    .dept-kpis, .exec-kpis, .acct-kpis { grid-template-columns: 1fr; }
 }
 .dept-kpi .lbl { font-size: 0.72rem; color: #64748b; font-weight: 600; margin-top: 0.15rem; }
 .dept-kpi.blue .ico { background: #dbeafe; color: #2563eb; }

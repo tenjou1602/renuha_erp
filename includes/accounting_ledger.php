@@ -421,11 +421,226 @@ function syncProjectFundsFromLabor(PDO $pdo, ?int $projectId = null): void
     }
 }
 
+function purchaseOrderMaterialsByOrder(PDO $pdo): array
+{
+    $grouped = [];
+    try {
+        $rows = $pdo->query("
+            SELECT poi.purchase_order_id, m.name AS material_name, m.unit, poi.quantity, poi.unit_price
+            FROM purchase_order_items poi
+            LEFT JOIN materials m ON m.id = poi.material_id
+            ORDER BY poi.id
+        ")->fetchAll();
+    } catch (PDOException $e) {
+        return [];
+    }
+    foreach ($rows as $row) {
+        $grouped[(int) $row['purchase_order_id']][] = $row;
+    }
+    return $grouped;
+}
+
+function queuePurchaseOrderForAccounting(PDO $pdo, int $orderId, int $userId): int
+{
+    $stmt = $pdo->prepare("SELECT id, po_number, supplier, total_amount, order_date, project_id, status FROM purchase_orders WHERE id = ?");
+    $stmt->execute([$orderId]);
+    $order = $stmt->fetch();
+    if (!$order || (int) $order['project_id'] <= 0 || in_array($order['status'], ['draft', 'cancelled'], true)) {
+        return 0;
+    }
+    $amount = round((float) $order['total_amount'], 2);
+    if ($amount <= 0) {
+        return 0;
+    }
+    $description = 'Materials on ' . $order['po_number'] . ' from ' . $order['supplier'];
+    $expenseDate = $order['order_date'] ?: date('Y-m-d');
+    $find = $pdo->prepare("SELECT id, status FROM expenses WHERE purchase_order_id = ? ORDER BY id DESC LIMIT 1");
+    $find->execute([$orderId]);
+    $existing = $find->fetch();
+    if ($existing) {
+        if ($existing['status'] === 'pending') {
+            $pdo->prepare("UPDATE expenses SET project_id = ?, amount = ?, expense_date = ?, description = ?, payment_method = 'Purchase order', reference_number = ? WHERE id = ? AND status = 'pending'")
+                ->execute([(int) $order['project_id'], $amount, $expenseDate, $description, $order['po_number'], (int) $existing['id']]);
+        }
+        return (int) $existing['id'];
+    }
+    $pdo->prepare("INSERT INTO expenses (expense_number, project_id, category, description, amount, expense_date, payment_method, reference_number, purchase_order_id, status, created_by) VALUES (?, ?, 'Materials', ?, ?, ?, 'Purchase order', ?, ?, 'pending', ?)")
+        ->execute([
+            generateNumber('EXP', 'expenses', 'expense_number'),
+            (int) $order['project_id'],
+            $description,
+            $amount,
+            $expenseDate,
+            $order['po_number'],
+            $orderId,
+            $userId > 0 ? $userId : null,
+        ]);
+    return (int) $pdo->lastInsertId();
+}
+
+function releasePaidOrderToWarehouse(PDO $pdo, int $expenseId): void
+{
+    $stmt = $pdo->prepare("
+        SELECT e.purchase_order_id, po.po_number, po.project_id
+        FROM expenses e
+        INNER JOIN purchase_orders po ON po.id = e.purchase_order_id
+        WHERE e.id = ? AND e.status = 'paid'
+    ");
+    $stmt->execute([$expenseId]);
+    $order = $stmt->fetch();
+    if (!$order) {
+        return;
+    }
+    $update = $pdo->prepare("UPDATE purchase_orders SET status = 'ready_for_warehouse' WHERE id = ? AND status IN ('sent', 'confirmed') AND received_at IS NULL");
+    $update->execute([(int) $order['purchase_order_id']]);
+    if ($update->rowCount() !== 1) {
+        return;
+    }
+    $poId = (int) $order['purchase_order_id'];
+    $projectId = (int) $order['project_id'] > 0 ? (int) $order['project_id'] : null;
+    $message = $order['po_number'] . ' is paid. Warehouse can receive the materials.';
+    notify('warehouse', 'po_ready', 'Purchase order ready to receive', $message, 'modules/warehouse/receive_purchases.php?po=' . $poId, $projectId, 'purchase_order', $poId);
+    notify('procurement', 'po_ready', 'Purchase order paid', $message, 'modules/procurement/purchase_orders.php?action=view&id=' . $poId, $projectId, 'purchase_order', $poId);
+}
+
+function paySubmittedQuotation(PDO $pdo, int $quotationId, int $userId): string
+{
+    $quoteStmt = $pdo->prepare("
+        SELECT id, quotation_number, project_id, purchase_request_id, supplier, supplier_contact, status, total_amount
+        FROM quotations
+        WHERE id = ? AND submitted_to_accounting_at IS NOT NULL
+    ");
+    $quoteStmt->execute([$quotationId]);
+    $quote = $quoteStmt->fetch();
+    if (!$quote) {
+        throw new RuntimeException('This quotation has not been sent to Accounting.');
+    }
+    if ($quote['status'] === 'rejected') {
+        throw new RuntimeException('A rejected quotation cannot be paid.');
+    }
+    $projectId = (int) $quote['project_id'];
+    if ($projectId <= 0 && !empty($quote['purchase_request_id'])) {
+        $projectStmt = $pdo->prepare("SELECT project_id FROM purchase_requests WHERE id = ?");
+        $projectStmt->execute([(int) $quote['purchase_request_id']]);
+        $projectId = (int) $projectStmt->fetchColumn();
+    }
+    if ($projectId <= 0) {
+        throw new RuntimeException('This quotation must be linked to a project before it can be paid.');
+    }
+    $lines = $pdo->prepare("
+        SELECT material_id, quantity, unit_price
+        FROM quotation_items
+        WHERE quotation_id = ? AND material_id IS NOT NULL AND quantity > 0
+        ORDER BY id
+    ");
+    $lines->execute([$quotationId]);
+    $items = $lines->fetchAll();
+    if (!$items) {
+        throw new RuntimeException('This quotation has no materials to pay.');
+    }
+
+    $pdo->beginTransaction();
+    try {
+        $existing = null;
+        if (!empty($quote['purchase_request_id'])) {
+            $findOrder = $pdo->prepare("SELECT id, po_number, status, received_at FROM purchase_orders WHERE purchase_request_id = ? AND status <> 'cancelled' ORDER BY id DESC LIMIT 1");
+            $findOrder->execute([(int) $quote['purchase_request_id']]);
+            $existing = $findOrder->fetch() ?: null;
+        }
+        if ($existing && ($existing['status'] === 'delivered' || !empty($existing['received_at']))) {
+            throw new RuntimeException($existing['po_number'] . ' was already received by Warehouse.');
+        }
+
+        if ($existing) {
+            $orderId = (int) $existing['id'];
+            $poNumber = $existing['po_number'];
+        } else {
+            $poNumber = generateNumber('PO', 'purchase_orders', 'po_number');
+            $insertOrder = $pdo->prepare("INSERT INTO purchase_orders (po_number, purchase_request_id, project_id, supplier, supplier_contact, order_date, payment_terms, total_amount, status, created_by) VALUES (?, ?, ?, ?, ?, CURDATE(), 'Paid by Accounting', 0, 'ready_for_warehouse', ?)");
+            $insertOrder->execute([
+                $poNumber,
+                !empty($quote['purchase_request_id']) ? (int) $quote['purchase_request_id'] : null,
+                $projectId,
+                $quote['supplier'],
+                $quote['supplier_contact'] !== '' ? $quote['supplier_contact'] : null,
+                $userId > 0 ? $userId : null,
+            ]);
+            $orderId = (int) $pdo->lastInsertId();
+            $insertItem = $pdo->prepare("INSERT INTO purchase_order_items (purchase_order_id, material_id, quantity, unit_price, received_quantity) VALUES (?, ?, ?, ?, 0)");
+            foreach ($items as $item) {
+                $insertItem->execute([$orderId, (int) $item['material_id'], (int) $item['quantity'], round((float) $item['unit_price'], 2)]);
+            }
+        }
+
+        $totalStmt = $pdo->prepare("SELECT ROUND(COALESCE(SUM(quantity * unit_price), 0), 2) FROM purchase_order_items WHERE purchase_order_id = ?");
+        $totalStmt->execute([$orderId]);
+        $total = round((float) $totalStmt->fetchColumn(), 2);
+        if ($total <= 0) {
+            $total = round((float) $quote['total_amount'], 2);
+        }
+        $pdo->prepare("UPDATE purchase_orders SET status = 'ready_for_warehouse', project_id = ?, total_amount = ? WHERE id = ? AND received_at IS NULL AND status <> 'delivered'")
+            ->execute([$projectId, $total, $orderId]);
+
+        $description = 'Materials on ' . $poNumber . ' from ' . $quote['supplier'] . ' (' . $quote['quotation_number'] . ')';
+        $findExpense = $pdo->prepare("SELECT id, status FROM expenses WHERE purchase_order_id = ? ORDER BY id DESC LIMIT 1");
+        $findExpense->execute([$orderId]);
+        $expense = $findExpense->fetch();
+        if ($expense && $expense['status'] === 'paid') {
+            $pdo->commit();
+            return $poNumber . ' is already paid. Warehouse can receive the materials.';
+        }
+        if ($expense) {
+            $pdo->prepare("UPDATE expenses SET project_id = ?, amount = ?, description = ?, payment_method = 'Purchase order', reference_number = ?, status = 'paid', paid_by = ?, paid_at = NOW() WHERE id = ? AND status = 'pending'")
+                ->execute([$projectId, $total, $description, $poNumber, $userId > 0 ? $userId : null, (int) $expense['id']]);
+        } else {
+            $pdo->prepare("INSERT INTO expenses (expense_number, project_id, category, description, amount, expense_date, payment_method, reference_number, purchase_order_id, status, paid_by, paid_at, created_by) VALUES (?, ?, 'Materials', ?, ?, CURDATE(), 'Purchase order', ?, ?, 'paid', ?, NOW(), ?)")
+                ->execute([
+                    generateNumber('EXP', 'expenses', 'expense_number'),
+                    $projectId,
+                    $description,
+                    $total,
+                    $poNumber,
+                    $orderId,
+                    $userId > 0 ? $userId : null,
+                    $userId > 0 ? $userId : null,
+                ]);
+        }
+
+        $pdo->prepare("UPDATE quotations SET status = 'accepted' WHERE id = ? AND status <> 'rejected'")->execute([$quotationId]);
+        if (!empty($quote['purchase_request_id'])) {
+            $pdo->prepare("UPDATE purchase_requests SET status = 'ordered', total_amount = ? WHERE id = ? AND status IN ('approved', 'confirmed', 'ordered')")
+                ->execute([$total, (int) $quote['purchase_request_id']]);
+        }
+        $pdo->commit();
+    } catch (Throwable $e) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        throw $e;
+    }
+
+    notify('warehouse', 'po_ready', 'Purchase order ready to receive', $poNumber . ' is paid. Warehouse can receive the materials.', 'modules/warehouse/receive_purchases.php?po=' . $orderId, $projectId, 'purchase_order', $orderId);
+    notify('procurement', 'po_ready', 'Quotation paid', $quote['quotation_number'] . ' was paid. ' . $poNumber . ' is ready for Warehouse.', 'modules/procurement/purchase_orders.php?action=view&id=' . $orderId, $projectId, 'purchase_order', $orderId);
+    return $poNumber . ' is paid for ₱' . number_format($total, 2) . '. Warehouse can now receive the materials.';
+}
+
+function holdUnreceivedOrderForPayment(PDO $pdo, int $expenseId): void
+{
+    $stmt = $pdo->prepare("SELECT purchase_order_id FROM expenses WHERE id = ? AND purchase_order_id IS NOT NULL");
+    $stmt->execute([$expenseId]);
+    $orderId = (int) $stmt->fetchColumn();
+    if ($orderId <= 0) {
+        return;
+    }
+    $pdo->prepare("UPDATE purchase_orders SET status = 'sent' WHERE id = ? AND status = 'ready_for_warehouse' AND received_at IS NULL")
+        ->execute([$orderId]);
+}
+
 function syncPurchasedMaterialsToAccounting(PDO $pdo): void
 {
     try {
         $orders = $pdo->query("
-            SELECT po.po_number, po.supplier, pr.project_id,
+            SELECT po.id AS purchase_order_id, po.po_number, po.supplier, pr.project_id,
                    COALESCE(DATE(po.received_at), po.order_date, CURDATE()) AS expense_date,
                    ROUND(SUM(poi.received_quantity * poi.unit_price), 2) AS spent
             FROM purchase_orders po
@@ -437,16 +652,16 @@ function syncPurchasedMaterialsToAccounting(PDO $pdo): void
             GROUP BY po.id, po.po_number, po.supplier, pr.project_id, COALESCE(DATE(po.received_at), po.order_date, CURDATE())
             HAVING spent > 0
         ")->fetchAll();
-        $find = $pdo->prepare("SELECT id FROM expenses WHERE reference_number = ? AND category = 'Materials' LIMIT 1");
-        $update = $pdo->prepare("UPDATE expenses SET project_id = ?, amount = ?, expense_date = ?, description = ?, status = 'paid', payment_method = 'Purchase order' WHERE id = ?");
-        $insert = $pdo->prepare("INSERT INTO expenses (expense_number, project_id, category, description, amount, expense_date, payment_method, reference_number, status) VALUES (?, ?, 'Materials', ?, ?, ?, 'Purchase order', ?, 'paid')");
+        $find = $pdo->prepare("SELECT id FROM expenses WHERE purchase_order_id = ? OR (reference_number = ? AND category = 'Materials' AND payment_method = 'Purchase order') ORDER BY purchase_order_id IS NULL LIMIT 1");
+        $update = $pdo->prepare("UPDATE expenses SET project_id = ?, amount = ?, expense_date = ?, description = ?, payment_method = 'Purchase order', purchase_order_id = ? WHERE id = ?");
+        $insert = $pdo->prepare("INSERT INTO expenses (expense_number, project_id, category, description, amount, expense_date, payment_method, reference_number, purchase_order_id, status) VALUES (?, ?, 'Materials', ?, ?, ?, 'Purchase order', ?, ?, 'pending')");
         foreach ($orders as $order) {
             $amount = round((float) $order['spent'], 2);
             $description = 'Purchased materials from ' . $order['supplier'] . ' (' . $order['po_number'] . ')';
-            $find->execute([$order['po_number']]);
+            $find->execute([(int) $order['purchase_order_id'], $order['po_number']]);
             $existingId = (int) $find->fetchColumn();
             if ($existingId > 0) {
-                $update->execute([(int) $order['project_id'], $amount, $order['expense_date'], $description, $existingId]);
+                $update->execute([(int) $order['project_id'], $amount, $order['expense_date'], $description, (int) $order['purchase_order_id'], $existingId]);
             } else {
                 $insert->execute([
                     generateNumber('EXP', 'expenses', 'expense_number'),
@@ -455,6 +670,7 @@ function syncPurchasedMaterialsToAccounting(PDO $pdo): void
                     $amount,
                     $order['expense_date'],
                     $order['po_number'],
+                    (int) $order['purchase_order_id'],
                 ]);
             }
         }

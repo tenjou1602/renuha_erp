@@ -17,7 +17,7 @@ try {
     $stats['pending_prs'] = $pdo->query("SELECT COUNT(*) FROM purchase_requests WHERE status = 'pending'")->fetchColumn() ?? 0;
     $stats['for_comparison'] = $pdo->query("SELECT COUNT(*) FROM purchase_requests pr WHERE pr.status = 'approved' AND NOT EXISTS (SELECT 1 FROM quotations q WHERE q.purchase_request_id = pr.id AND q.status = 'accepted')")->fetchColumn() ?? 0;
     $stats['ready_to_order'] = $pdo->query("SELECT COUNT(*) FROM purchase_requests pr WHERE EXISTS (SELECT 1 FROM quotations q WHERE q.purchase_request_id = pr.id AND q.status = 'accepted') AND NOT EXISTS (SELECT 1 FROM purchase_orders po WHERE po.purchase_request_id = pr.id AND po.status <> 'cancelled')")->fetchColumn() ?? 0;
-    $stats['total_value'] = $pdo->query("SELECT COALESCE(SUM(total_amount), 0) FROM purchase_requests WHERE status IN ('approved', 'confirmed', 'ordered', 'received', 'completed')")->fetchColumn() ?? 0;
+    $stats['total_value'] = $pdo->query("SELECT COALESCE(SUM(purchase_total), 0) FROM v_project_costs")->fetchColumn() ?? 0;
     $stats['for_warehouse'] = $pdo->query("SELECT COUNT(*) FROM purchase_orders WHERE status IN ('sent', 'confirmed', 'ready_for_warehouse')")->fetchColumn() ?? 0;
     $stats['purchased_materials'] = $pdo->query("SELECT COUNT(*) FROM purchase_orders WHERE status = 'delivered'")->fetchColumn() ?? 0;
     
@@ -71,7 +71,7 @@ include '../../includes/header.php';
         <a class="dept-kpi blue" href="purchase_orders.php"><div class="ico"><i class="fas fa-shopping-cart"></i></div><div><div class="num"><?php echo number_format($stats['ready_to_order'] ?? 0); ?></div><div class="lbl">3. Create orders</div></div></a>
         <a class="dept-kpi teal" href="purchased_materials.php"><div class="ico"><i class="fas fa-truck-loading"></i></div><div><div class="num"><?php echo number_format($stats['for_warehouse'] ?? 0); ?></div><div class="lbl">4. For warehouse</div></div></a>
         <a class="dept-kpi purple" href="purchased_materials.php"><div class="ico"><i class="fas fa-boxes"></i></div><div><div class="num"><?php echo number_format($stats['purchased_materials'] ?? 0); ?></div><div class="lbl">Delivered orders</div></div></a>
-        <a class="dept-kpi green" href="reports.php?report=costs"><div class="ico"><i class="fas fa-coins"></i></div><div><div class="num">₱<?php echo number_format((float) ($stats['total_value'] ?? 0), 0); ?></div><div class="lbl">Purchase Costs</div></div></a>
+        <a class="dept-kpi green" href="reports.php"><div class="ico"><i class="fas fa-coins"></i></div><div><div class="num" title="₱<?php echo number_format((float) ($stats['total_value'] ?? 0), 2); ?>"><?php echo formatCompactMoney($stats['total_value'] ?? 0); ?></div><div class="lbl">Recorded Purchase Costs</div></div></a>
     </div>
 
     <div class="card">

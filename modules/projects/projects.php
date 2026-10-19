@@ -5,7 +5,7 @@ require_once '../../includes/quotation_file.php';
 
 requireDepartment(['engineering']);
 
-$page_title = (($_GET['action'] ?? 'list') === 'add') ? 'Encode Project' : 'Project Status';
+$page_title = (($_GET['action'] ?? 'list') === 'add') ? 'Create Project' : 'Project Status';
 $action = $_GET['action'] ?? 'list';
 $id = (int)($_GET['id'] ?? 0);
 
@@ -85,8 +85,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         
         if (empty($name)) $errors[] = 'Project name is required.';
         if ($estimated_budget <= 0) $errors[] = 'Estimated budget must be greater than 0.';
+        $raw_start = trim((string) ($_POST['start_date'] ?? ''));
+        $raw_end = trim((string) ($_POST['end_date'] ?? ''));
+        if ($raw_start === '' || $start_date === null) {
+            $errors[] = 'Start date is required and must be a real calendar date (YYYY-MM-DD).';
+        }
+        if ($raw_end === '' || $end_date === null) {
+            $errors[] = 'End date is required and must be a real calendar date (YYYY-MM-DD).';
+        }
         if ($start_date !== null && $end_date !== null && $end_date < $start_date) {
             $errors[] = 'End date must be on or after the start date.';
+        }
+        $quotation_hash = null;
+        if ($hasQuotationFile && is_uploaded_file($uploaded['tmp_name'] ?? '')) {
+            $quotation_hash = hash_file('sha256', $uploaded['tmp_name']);
+            $dup = $pdo->prepare("SELECT project_code FROM projects WHERE quotation_fingerprint = ? AND id <> ? LIMIT 1");
+            $dup->execute([$quotation_hash, isset($_POST['update_project']) ? (int) $id : 0]);
+            $dupCode = $dup->fetchColumn();
+            if ($dupCode) {
+                $errors[] = 'This quotation was already used for project ' . $dupCode . '.';
+            }
         }
         if (isset($_POST['add_project'])) {
             if ($assigned_to === null) {
@@ -125,7 +143,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $new_project_id = (int) $pdo->lastInsertId();
                     $attachment = storeProjectQuotation($uploaded, $new_project_id);
                     if ($attachment) {
-                        $pdo->prepare("UPDATE projects SET quotation_path = ?, quotation_name = ? WHERE id = ?")->execute([$attachment['path'], $attachment['name'], $new_project_id]);
+                        $pdo->prepare("UPDATE projects SET quotation_path = ?, quotation_name = ?, quotation_fingerprint = ? WHERE id = ?")->execute([$attachment['path'], $attachment['name'], $quotation_hash, $new_project_id]);
                     }
                     if (!empty($extracted['items'])) {
                         $itemStmt = $pdo->prepare("INSERT INTO project_quotation_items (project_id, item_name, description, quantity, unit, unit_price, line_type) VALUES (?, ?, ?, ?, ?, ?, ?)");
@@ -181,7 +199,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     if ($hasQuotationFile && $id > 0) {
                         $attachment = storeProjectQuotation($uploaded, $id);
                         if ($attachment) {
-                            $pdo->prepare("UPDATE projects SET quotation_path = ?, quotation_name = ? WHERE id = ?")->execute([$attachment['path'], $attachment['name'], $id]);
+                            $pdo->prepare("UPDATE projects SET quotation_path = ?, quotation_name = ?, quotation_fingerprint = ? WHERE id = ?")->execute([$attachment['path'], $attachment['name'], $quotation_hash, $id]);
                         }
                         if (!empty($extracted['items'])) {
                             $pdo->prepare("DELETE FROM project_quotation_items WHERE project_id = ?")->execute([$id]);
@@ -229,6 +247,23 @@ if (isset($_GET['delete_id']) && $action === 'delete') {
         exit();
     }
     $delete_id = (int)$_GET['delete_id'];
+    $linked = [];
+    foreach (['expenses' => 'expenses', 'purchase_requests' => 'purchase requests', 'purchase_orders' => 'purchase orders', 'material_requests' => 'material requests'] as $table => $label) {
+        try {
+            $countStmt = $pdo->prepare("SELECT COUNT(*) FROM {$table} WHERE project_id = ?");
+            $countStmt->execute([$delete_id]);
+            $count = (int) $countStmt->fetchColumn();
+            if ($count > 0) {
+                $linked[] = $count . ' ' . $label;
+            }
+        } catch (PDOException $e) {
+        }
+    }
+    if ($linked) {
+        $_SESSION['error'] = 'This project cannot be deleted because it has ' . implode(', ', $linked) . '. Set the project to On Hold instead.';
+        header('Location: projects.php');
+        exit();
+    }
     try {
         $pdo->beginTransaction();
         $fileStmt = $pdo->prepare("SELECT quotation_path FROM projects WHERE id = ?");
@@ -416,7 +451,7 @@ include '../../includes/header.php';
     <?php if ($action === 'list'): ?>
         <div style="display:flex;gap:0.5rem;flex-wrap:wrap;">
             <?php if (canEncodeApprovedProject()): ?>
-            <a href="?action=add" class="btn btn-primary"><i class="fas fa-plus"></i> Encode Approved Project</a>
+            <a href="?action=add" class="btn btn-primary"><i class="fas fa-plus"></i> Create Project</a>
             <?php endif; ?>
         </div>
     <?php endif; ?>
@@ -435,7 +470,7 @@ include '../../includes/header.php';
 <?php if ($action === 'add' || $action === 'edit'): ?>
 <!-- Add/Edit Form -->
 <div class="card">
-    <h3><?php echo $action === 'add' ? 'Encode Approved Project' : 'Update Project'; ?></h3>
+    <h3><?php echo $action === 'add' ? 'Create Project' : 'Update Project'; ?></h3>
     <?php if ($action === 'add'): ?>
     <p style="color:#64748b;margin-top:0;">Attach the quotation file. Project, Location, Client, and Subject are filled from it and saved on the project. Accounting can view that file and create the client quotation from it.</p>
     <?php endif; ?>
@@ -521,12 +556,12 @@ include '../../includes/header.php';
         
         <div class="form-row">
             <div class="form-group">
-                <label>Start Date</label>
-                <input type="date" name="start_date" id="projectStartDate" value="<?php echo htmlspecialchars(nullableDate($project_details['start_date'] ?? '') ?? ''); ?>">
+                <label class="required">Start Date</label>
+                <input type="date" name="start_date" id="projectStartDate" required value="<?php echo htmlspecialchars(nullableDate($project_details['start_date'] ?? '') ?? ''); ?>">
             </div>
             <div class="form-group">
-                <label>End Date</label>
-                <input type="date" name="end_date" id="projectEndDate" value="<?php echo htmlspecialchars(nullableDate($project_details['end_date'] ?? '') ?? ''); ?>">
+                <label class="required">End Date</label>
+                <input type="date" name="end_date" id="projectEndDate" required value="<?php echo htmlspecialchars(nullableDate($project_details['end_date'] ?? '') ?? ''); ?>">
             </div>
             <div class="form-group">
                 <label>Status</label>
@@ -567,7 +602,7 @@ include '../../includes/header.php';
     function syncEndMin() {
         if (!start || !end) return;
         end.min = start.value || '';
-        if (start.value && end.value && end.value < start.value) end.value = start.value;
+        if (start.value && end.value && end.value < start.value) end.value = '';
     }
     start?.addEventListener('change', syncEndMin);
     form?.addEventListener('submit', function () {
@@ -635,7 +670,7 @@ document.getElementById('projectQuoteFile')?.addEventListener('change', async ()
         <div class="detail-row"><span>Client:</span> <?php echo htmlspecialchars($project_details['client'] ?? 'N/A'); ?></div>
         <div class="detail-row"><span>Subject:</span> <?php echo htmlspecialchars($project_details['subject'] ?? 'N/A'); ?></div>
         <div class="detail-row"><span>Quotation file:</span> <?php if (!empty($project_details['quotation_path'])): ?><a href="<?php echo APP_URL . htmlspecialchars($project_details['quotation_path']); ?>" target="_blank"><?php echo htmlspecialchars($project_details['quotation_name'] ?: 'View file'); ?></a><?php else: ?>No file attached<?php endif; ?></div>
-        <div class="detail-row"><span>Accounting:</span> <?php echo (($project_details['accounting_status'] ?? '') === 'received' || !empty($project_details['accounting_received_at'])) ? 'Received' . (!empty($project_details['accounting_received_at']) ? ' ' . date('M d, Y h:i A', strtotime($project_details['accounting_received_at'])) : '') : 'Waiting in Received Projects'; ?></div>
+        <div class="detail-row"><span>Accounting:</span> <?php $acctDecision = accountingDecisionLabel($project_details['accounting_status'] ?? ''); ?><span class="badge badge-<?php echo $acctDecision === 'approved' ? 'approved' : ($acctDecision === 'rejected' ? 'rejected' : 'pending'); ?>"><?php echo ucfirst($acctDecision); ?></span></div>
         <div class="detail-row"><span>Engineering:</span> <?php echo !empty($project_details['engineering_received_at']) ? 'Received ' . date('M d, Y h:i A', strtotime($project_details['engineering_received_at'])) : 'Waiting in Received Projects'; ?></div>
         <div class="detail-row"><span>Project In-Charge:</span> <?php echo htmlspecialchars($project_details['in_charge_name'] ?? 'Not assigned (Accounting)'); ?></div>
         <div class="detail-row"><span>Status:</span> <span class="badge badge-<?php echo $project_details['status']; ?>"><?php echo ucfirst($project_details['status']); ?></span></div>
@@ -644,7 +679,9 @@ document.getElementById('projectQuoteFile')?.addEventListener('change', async ()
         <div class="detail-row"><span>Estimated Budget:</span> <strong>₱<?php echo number_format((float) $project_details['estimated_budget'], 2); ?></strong></div>
         <div class="detail-row" <?php echo ((float) ($project_details['actual_cost'] ?? 0) > (float) $project_details['estimated_budget']) ? 'style="background:#fee2e2;"' : ''; ?>><span>Actual Cost:</span> <strong>₱<?php echo number_format((float) ($project_details['actual_cost'] ?? 0), 2); ?></strong></div>
         <div class="detail-row"><span>Pending/Committed:</span> <strong>₱<?php echo number_format((float) ($project_details['pending_cost'] ?? 0), 2); ?></strong></div>
-        <div class="detail-row"><span>Budget Variance:</span> <strong>₱<?php echo number_format((float) ($project_details['budget_variance'] ?? ((float) $project_details['estimated_budget'] - (float) ($project_details['actual_cost'] ?? 0))), 2); ?></strong></div>
+        <?php $costPosition = budgetPosition((float) $project_details['estimated_budget'], (float) ($project_details['actual_cost'] ?? 0), (float) ($project_details['pending_cost'] ?? 0)); ?>
+        <div class="detail-row"><span>Budget Variance:</span> <strong style="color:<?php echo $costPosition['over'] ? '#dc2626' : '#059669'; ?>;">₱<?php echo number_format($costPosition['variance'], 2); ?> · <?php echo $costPosition['label']; ?><?php echo $costPosition['percent'] === null ? '' : ' (' . number_format($costPosition['percent'], 1) . '%)'; ?></strong></div>
+        <div class="detail-row"><span>Remaining after committed:</span> <strong>₱<?php echo number_format($costPosition['remaining_after_committed'], 2); ?></strong></div>
         <?php if ($project_details['description']): ?>
             <div class="detail-row"><span>Description:</span> <?php echo nl2br(htmlspecialchars($project_details['description'])); ?></div>
         <?php endif; ?>
@@ -709,7 +746,7 @@ document.getElementById('projectQuoteFile')?.addEventListener('change', async ()
                     <tr>
                         <td colspan="9" style="text-align:center;color:#94a3b8;padding:2rem;">
                             <i class="fas fa-building" style="font-size:2rem;display:block;margin-bottom:0.5rem;opacity:0.3;"></i>
-                            No projects encoded yet. Encode an approved project and attach the quotation.
+                            No projects yet. Create a project and attach the quotation.
                         </td>
                     </tr>
                 <?php else: ?>
@@ -729,11 +766,7 @@ document.getElementById('projectQuoteFile')?.addEventListener('change', async ()
                             <?php endif; ?>
                         </td>
                         <td>
-                            <?php if (!empty($project['accounting_received_at'])): ?>
-                                <span class="badge badge-approved">Received</span>
-                            <?php else: ?>
-                                <span class="badge badge-pending">Waiting</span>
-                            <?php endif; ?>
+                            <?php echo accountingDecisionView(accountingDecisionLabel($project['accounting_status'] ?? '')); ?>
                         </td>
                         <td>
                             <?php if (!empty($project['engineering_received_at'])): ?>

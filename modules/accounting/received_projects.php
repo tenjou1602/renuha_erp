@@ -6,18 +6,14 @@ requireDepartment(['accounting']);
 
 $page_title = 'Received Projects';
 
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['receive_project'])) {
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['set_accounting_decision'])) {
     if (!canWriteDepartmentData('accounting')) {
         $_SESSION['error'] = 'Administrators have view-only access.';
     } else {
-        $projectId = (int) ($_POST['project_id'] ?? 0);
-        $stmt = $pdo->prepare("UPDATE projects SET accounting_received_at = NOW(), accounting_status = 'received' WHERE id = ? AND accounting_status = 'pending'");
-        $stmt->execute([$projectId]);
-        if ($stmt->rowCount() === 1) {
-            $pdo->prepare("UPDATE material_requests SET flow_status = 'warehouse' WHERE project_id = ? AND flow_status = 'accounting'")->execute([$projectId]);
-            $pdo->prepare("UPDATE purchase_orders po INNER JOIN purchase_requests pr ON pr.id = po.purchase_request_id SET po.status = 'ready_for_warehouse' WHERE pr.project_id = ? AND po.status IN ('sent', 'confirmed')")->execute([$projectId]);
-            notifyAccountingReceived($projectId);
-            $_SESSION['success'] = 'Project received. You can record the quotation, budget, contract, and expenses.';
+        try {
+            $_SESSION['success'] = setAccountingProjectDecision($pdo, (int) ($_POST['project_id'] ?? 0), (string) ($_POST['decision'] ?? ''));
+        } catch (Throwable $e) {
+            $_SESSION['error'] = $e instanceof PDOException ? userDatabaseError($e, 'Accounting') : $e->getMessage();
         }
     }
     header('Location: received_projects.php');
@@ -29,8 +25,8 @@ try {
     $projects = $pdo->query("
         SELECT id, project_code, name, client, location, subject, estimated_budget, status, quotation_path, quotation_name, accounting_received_at, accounting_status, created_by, created_at
         FROM projects
-        WHERE accounting_status IN ('pending', 'received')
-        ORDER BY (accounting_status = 'pending') DESC, created_at DESC
+        WHERE accounting_status IN ('pending', 'received', 'quoted', 'rejected')
+        ORDER BY FIELD(accounting_status, 'received', 'quoted', 'rejected', 'pending', 'draft', 'revision'), COALESCE(accounting_received_at, created_at) DESC
     ")->fetchAll();
 } catch (PDOException $e) {
     $error = userDatabaseError($e, 'Accounting');
@@ -53,7 +49,7 @@ include '../../includes/header.php';
     <div class="alert alert-danger"><?php echo htmlspecialchars($error); ?></div>
 <?php endif; ?>
 
-<p style="color:#64748b;">Projects encoded by Executive Admin appear here. Receive the project, then create the quotation from the attached file.</p>
+<p style="color:#64748b;">Projects encoded by Executive Admin appear here. Set the status to Pending, Approved, or Rejected, then create the quotation from the attached file.</p>
 
 <div class="card">
     <div class="table-responsive">
@@ -78,17 +74,32 @@ include '../../includes/header.php';
                     <td>
                         <strong><?php echo htmlspecialchars($project['project_code']); ?></strong><br>
                         <?php echo htmlspecialchars($project['name']); ?>
-                        <?php if (($project['accounting_status'] ?? '') === 'pending'): ?>
-                            <span class="badge badge-pending">New</span>
-                        <?php else: ?>
-                            <span class="badge badge-approved">Received</span>
-                        <?php endif; ?>
                     </td>
                     <td><?php echo htmlspecialchars($project['client'] ?: '—'); ?></td>
                     <td><?php echo htmlspecialchars($project['location'] ?: '—'); ?></td>
                     <td><?php echo htmlspecialchars($project['subject'] ?: '—'); ?></td>
                     <td>₱<?php echo number_format((float) $project['estimated_budget'], 2); ?></td>
-                    <td><span class="badge badge-<?php echo htmlspecialchars($project['status']); ?>"><?php echo ucfirst($project['status']); ?></span></td>
+                    <td>
+                        <?php
+                        $decision = 'pending';
+                        if (($project['accounting_status'] ?? '') === 'rejected') {
+                            $decision = 'rejected';
+                        } elseif (in_array($project['accounting_status'] ?? '', ['received', 'quoted'], true)) {
+                            $decision = 'approved';
+                        }
+                        ?>
+                        <?php if (canWriteDepartmentData('accounting')): ?>
+                            <form method="POST" style="display:flex;gap:0.25rem;flex-wrap:wrap;">
+                                <input type="hidden" name="set_accounting_decision" value="1">
+                                <input type="hidden" name="project_id" value="<?php echo (int) $project['id']; ?>">
+                                <button type="submit" name="decision" value="pending" class="btn btn-sm <?php echo $decision === 'pending' ? 'btn-warning' : 'btn-outline'; ?>">Pending</button>
+                                <button type="submit" name="decision" value="approved" class="btn btn-sm <?php echo $decision === 'approved' ? 'btn-success' : 'btn-outline'; ?>">Approved</button>
+                                <button type="submit" name="decision" value="rejected" class="btn btn-sm <?php echo $decision === 'rejected' ? 'btn-danger' : 'btn-outline'; ?>" onclick="return confirm('Reject this project?');">Rejected</button>
+                            </form>
+                        <?php else: ?>
+                            <?php echo accountingDecisionView($decision); ?>
+                        <?php endif; ?>
+                    </td>
                     <td style="white-space:nowrap;">
                         <?php if (!empty($project['quotation_path'])): ?>
                             <a class="btn btn-sm btn-outline" target="_blank" href="<?php echo APP_URL . htmlspecialchars($project['quotation_path']); ?>">View file</a>
@@ -98,13 +109,6 @@ include '../../includes/header.php';
                         <a class="btn btn-sm btn-outline" href="labor_budget.php?action=add&project=<?php echo (int) $project['id']; ?>">Labor</a>
                         <a class="btn btn-sm btn-outline" href="funds_budget.php?action=add&project=<?php echo (int) $project['id']; ?>">Funds</a>
                         <a class="btn btn-sm btn-outline" href="assign_in_charge.php?project=<?php echo (int) $project['id']; ?>">Assign</a>
-                        <?php if (($project['accounting_status'] ?? '') === 'pending' && canWriteDepartmentData('accounting')): ?>
-                            <form method="POST" style="display:inline;">
-                                <input type="hidden" name="receive_project" value="1">
-                                <input type="hidden" name="project_id" value="<?php echo (int) $project['id']; ?>">
-                                <button type="submit" class="btn btn-sm btn-success">Receive</button>
-                            </form>
-                        <?php endif; ?>
                     </td>
                 </tr>
                 <?php endforeach; ?>

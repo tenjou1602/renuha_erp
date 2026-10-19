@@ -602,10 +602,10 @@ function quotationItemFromMappedRow(array $row, array $map): ?array
     if ($description === '' || quotationHeaderMap([$description])) {
         return null;
     }
-    $qty = quotationNumber($row[$map['quantity']] ?? 1);
-    $price = quotationNumber($row[$map['unit_price']] ?? 0);
+    $qty = quotationNumber(isset($map['quantity']) ? ($row[$map['quantity']] ?? 1) : 1);
+    $price = quotationNumber(isset($map['unit_price']) ? ($row[$map['unit_price']] ?? 0) : 0);
     if (isset($map['amount']) && $price <= 0 && $qty > 0) {
-        $price = round(quotationNumber($row[$map['amount']]) / $qty, 2);
+        $price = round(quotationNumber($row[$map['amount']] ?? 0) / $qty, 2);
     }
     if ($qty <= 0) {
         return null;
@@ -614,7 +614,7 @@ function quotationItemFromMappedRow(array $row, array $map): ?array
         'line_type' => quotationLineType($description),
         'description' => $description,
         'quantity' => $qty,
-        'unit' => trim((string) ($row[$map['unit']] ?? '')) ?: 'pcs',
+        'unit' => trim((string) (isset($map['unit']) ? ($row[$map['unit']] ?? '') : '')) ?: 'pcs',
         'unit_price' => $price,
     ];
 }

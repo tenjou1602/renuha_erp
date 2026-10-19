@@ -16,28 +16,27 @@ $show_accounting = canViewModule('accounting');
 $show_warehouse = canViewModule('warehouse');
 
 
-// Determine which sections should be expanded
+// Only the section for the current page stays open.
 $expanded_sections = [];
-if ($current_module === 'projects' && $current_page !== 'projects.php') {
-    $expanded_sections[] = 'engineering';
-}
-if ($current_module === 'procurement') $expanded_sections[] = 'procurement';
-if ($current_module === 'accounting') $expanded_sections[] = 'accounting';
-if ($current_module === 'warehouse') $expanded_sections[] = 'warehouse';
-if ($current_module === 'admin') $expanded_sections[] = 'administration';
-if ($department === 'engineering') {
-    $expanded_sections[] = 'engineering';
-}
-if ($department === 'procurement') {
-    $expanded_sections[] = 'procurement';
-}
-if ($department === 'accounting') {
+if ($current_module === 'accounting') {
     $expanded_sections[] = 'accounting';
-}
-if ($department === 'warehouse') {
+} elseif ($current_module === 'procurement') {
+    $expanded_sections[] = 'procurement';
+} elseif ($current_module === 'warehouse') {
     $expanded_sections[] = 'warehouse';
-}
-if ($is_admin) {
+} elseif ($current_module === 'projects' && !($is_admin && $current_page === 'projects.php')) {
+    $expanded_sections[] = 'engineering';
+} elseif ($current_module === 'admin' || $current_page === 'index.php' || ($is_admin && $current_page === 'projects.php')) {
+    $expanded_sections[] = 'administration';
+} elseif ($department === 'engineering') {
+    $expanded_sections[] = 'engineering';
+} elseif ($department === 'procurement') {
+    $expanded_sections[] = 'procurement';
+} elseif ($department === 'accounting') {
+    $expanded_sections[] = 'accounting';
+} elseif ($department === 'warehouse') {
+    $expanded_sections[] = 'warehouse';
+} else {
     $expanded_sections[] = 'administration';
 }
 $accounting_new_projects = 0;
@@ -153,6 +152,10 @@ if ($sidebar_width > 400) $sidebar_width = 400;
                     <i class="fas fa-chart-line"></i>
                     <span>Dashboard</span>
                 </a>
+                <a href="<?php echo APP_URL; ?>modules/accounting/supplier_quotations.php" class="nav-item <?php echo $current_module === 'accounting' && $current_page === 'supplier_quotations.php' ? 'active' : ''; ?>">
+                    <i class="fas fa-file-invoice-dollar"></i>
+                    <span>Supplier Quotations</span>
+                </a>
                 <a href="<?php echo APP_URL; ?>modules/accounting/received_projects.php" class="nav-item <?php echo $current_module === 'accounting' && $current_page === 'received_projects.php' ? 'active' : ''; ?>">
                     <i class="fas fa-inbox"></i>
                     <span>Received Projects</span>
@@ -205,7 +208,7 @@ if ($sidebar_width > 400) $sidebar_width = 400;
                     <i class="fas fa-chart-pie"></i>
                     <span>Dashboard</span>
                 </a>
-                <a href="<?php echo APP_URL; ?>modules/projects/received_projects.php" class="nav-item <?php echo $current_module === 'projects' && $current_page === 'received_projects.php' && (int) ($_GET['id'] ?? 0) === 0 && !isset($_GET['requests']) ? 'active' : ''; ?>">
+                <a href="<?php echo APP_URL; ?>modules/projects/received_projects.php" class="nav-item <?php echo $current_module === 'projects' && $current_page === 'received_projects.php' && !isset($_GET['requests']) ? 'active' : ''; ?>">
                     <i class="fas fa-inbox"></i>
                     <span>Received Projects</span>
                 </a>
@@ -217,7 +220,7 @@ if ($sidebar_width > 400) $sidebar_width = 400;
                     <i class="fas fa-clipboard-list"></i>
                     <span>Project Requirements</span>
                 </a>
-                <a href="<?php echo APP_URL; ?>modules/projects/received_projects.php?requests=1" class="nav-item <?php echo $current_module === 'projects' && $current_page === 'received_projects.php' && (isset($_GET['requests']) || (int) ($_GET['id'] ?? 0) > 0) ? 'active' : ''; ?>">
+                <a href="<?php echo APP_URL; ?>modules/projects/received_projects.php?requests=1" class="nav-item <?php echo $current_module === 'projects' && $current_page === 'received_projects.php' && isset($_GET['requests']) ? 'active' : ''; ?>">
                     <i class="fas fa-paper-plane"></i>
                     <span>Material Requests</span>
                 </a>
@@ -753,9 +756,16 @@ if ($sidebar_width > 400) $sidebar_width = 400;
 // ============================================
 function toggleSection(header) {
     const section = header.closest('.nav-section');
-    if (section) {
-        section.classList.toggle('expanded');
+    if (!section) {
+        return;
     }
+    const open = !section.classList.contains('expanded');
+    document.querySelectorAll('.nav-section.collapsible.expanded').forEach(function (other) {
+        if (other !== section) {
+            other.classList.remove('expanded');
+        }
+    });
+    section.classList.toggle('expanded', open);
 }
 
 // ============================================
@@ -788,13 +798,17 @@ document.addEventListener('click', function(e) {
 // Auto-expand section based on current page
 document.addEventListener('DOMContentLoaded', function() {
     const sections = document.querySelectorAll('.nav-section.collapsible');
-    sections.forEach(section => {
-        const links = section.querySelectorAll('.nav-item');
-        links.forEach(link => {
-            if (link.classList.contains('active')) {
-                section.classList.add('expanded');
-            }
-        });
+    let activeSection = null;
+    sections.forEach(function (section) {
+        if (section.querySelector('.nav-item.active')) {
+            activeSection = section;
+        }
+    });
+    if (!activeSection) {
+        return;
+    }
+    sections.forEach(function (section) {
+        section.classList.toggle('expanded', section === activeSection);
     });
 });
 </script>

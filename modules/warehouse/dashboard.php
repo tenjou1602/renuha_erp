@@ -13,9 +13,11 @@ try {
     } catch (Throwable $e) {
         error_log('[Runeha ERP] department sync: ' . $e->getMessage());
     }
-    $stats['total_inventory'] = $pdo->query("SELECT COUNT(*) FROM materials WHERE status = 'active'")->fetchColumn() ?? 0;
-    $stats['total_stock'] = $pdo->query("SELECT COALESCE(SUM(current_stock), 0) FROM materials WHERE status = 'active'")->fetchColumn() ?? 0;
-    $stats['low_stock'] = $pdo->query("SELECT COUNT(*) FROM materials WHERE current_stock <= min_stock AND min_stock > 0 AND status = 'active'")->fetchColumn() ?? 0;
+    $stats['total_inventory'] = $pdo->query("SELECT COUNT(*) FROM materials WHERE status = 'active' AND current_stock > 0")->fetchColumn() ?? 0;
+    $stats['inventory_value'] = $pdo->query("SELECT COALESCE(SUM(current_stock * cost_per_unit), 0) FROM materials WHERE status = 'active' AND current_stock > 0")->fetchColumn() ?? 0;
+    $stats['total_stock'] = $stats['total_inventory'];
+    $stats['out_of_stock'] = $pdo->query("SELECT COUNT(*) FROM materials WHERE status = 'active' AND current_stock <= 0")->fetchColumn() ?? 0;
+    $stats['low_stock'] = $pdo->query("SELECT COUNT(*) FROM materials WHERE current_stock > 0 AND current_stock <= min_stock AND min_stock > 0 AND status = 'active'")->fetchColumn() ?? 0;
     
     $stats['incoming'] = $pdo->query("SELECT COUNT(*) FROM stock_movements WHERE movement_type = 'in' AND created_at >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)")->fetchColumn() ?? 0;
     $stats['outgoing'] = $pdo->query("SELECT COUNT(*) FROM stock_movements WHERE movement_type = 'out' AND created_at >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)")->fetchColumn() ?? 0;
@@ -27,7 +29,7 @@ try {
     $stats['released_today'] = $pdo->query("SELECT COALESCE(SUM(quantity), 0) FROM stock_movements WHERE movement_type = 'out' AND DATE(created_at) = CURDATE()")->fetchColumn() ?? 0;
     $stats['stock_in_today'] = $pdo->query("SELECT COALESCE(SUM(quantity), 0) FROM stock_movements WHERE movement_type = 'in' AND DATE(created_at) = CURDATE()")->fetchColumn() ?? 0;
     $stats['stock_out_today'] = $pdo->query("SELECT COALESCE(SUM(quantity), 0) FROM stock_movements WHERE movement_type = 'out' AND DATE(created_at) = CURDATE()")->fetchColumn() ?? 0;
-    $stats['incoming_materials'] = $pdo->query("SELECT COUNT(*) FROM purchase_orders WHERE status IN ('sent', 'confirmed', 'ready_for_warehouse')")->fetchColumn() ?? 0;
+    $stats['incoming_materials'] = $pdo->query("SELECT COUNT(*) FROM purchase_orders WHERE status = 'ready_for_warehouse' AND received_at IS NULL")->fetchColumn() ?? 0;
     try {
         $stats['pending_releases'] = $pdo->query("SELECT COUNT(*) FROM material_requests WHERE status = 'pending'")->fetchColumn() ?? 0;
     } catch (PDOException $e) {
@@ -72,7 +74,7 @@ include '../../includes/header.php';
     <?php renderLowStockBanner(APP_URL . 'modules/warehouse/inventory.php'); ?>
 
     <div class="dept-kpis">
-        <a class="dept-kpi green" href="inventory.php"><div class="ico"><i class="fas fa-boxes"></i></div><div><div class="num"><?php echo number_format($stats['total_stock'] ?? 0); ?></div><div class="lbl">Total Inventory</div></div></a>
+        <a class="dept-kpi green" href="inventory.php"><div class="ico"><i class="fas fa-boxes"></i></div><div><div class="num" title="Inventory value <?php echo formatCompactMoney($stats['inventory_value'] ?? 0); ?>. Count of items with stock, not a sum of mixed units."><?php echo number_format($stats['total_inventory'] ?? 0); ?></div><div class="lbl">Items In Stock</div></div></a>
         <a class="dept-kpi orange" href="inventory.php"><div class="ico"><i class="fas fa-exclamation-triangle"></i></div><div><div class="num"><?php echo number_format($stats['low_stock'] ?? 0); ?></div><div class="lbl">Low Stock Items</div></div></a>
         <a class="dept-kpi teal" href="receive_purchases.php"><div class="ico"><i class="fas fa-truck-loading"></i></div><div><div class="num"><?php echo number_format($stats['incoming_materials'] ?? 0); ?></div><div class="lbl">Incoming Materials</div></div></a>
         <a class="dept-kpi red" href="material_requests.php"><div class="ico"><i class="fas fa-dolly"></i></div><div><div class="num"><?php echo number_format($stats['pending_releases'] ?? 0); ?></div><div class="lbl">Pending Releases</div></div></a>
@@ -80,28 +82,68 @@ include '../../includes/header.php';
         <a class="dept-kpi blue" href="movements.php"><div class="ico"><i class="fas fa-exchange-alt"></i></div><div><div class="num"><?php echo number_format($stats['stock_in_today'] ?? 0); ?> / <?php echo number_format($stats['stock_out_today'] ?? 0); ?></div><div class="lbl">Stock-In / Stock-Out qty today</div></div></a>
     </div>
 
-    <div class="card">
-        <h3><i class="fas fa-chart-bar"></i> Stock movement</h3>
-        <canvas id="whChart" height="80"></canvas>
+    <?php
+    $movement_days = [];
+    try {
+        $movement_days = $pdo->query("
+            SELECT DATE(created_at) AS day,
+                   SUM(CASE WHEN movement_type = 'in' THEN quantity ELSE 0 END) AS qty_in,
+                   SUM(CASE WHEN movement_type = 'out' THEN quantity ELSE 0 END) AS qty_out
+            FROM stock_movements
+            WHERE created_at >= DATE_SUB(CURDATE(), INTERVAL 6 DAY)
+            GROUP BY DATE(created_at)
+            ORDER BY day
+        ")->fetchAll();
+    } catch (PDOException $e) {
+        $movement_days = [];
+    }
+    $day_labels = [];
+    $day_in = [];
+    $day_out = [];
+    for ($i = 6; $i >= 0; $i--) {
+        $day = date('Y-m-d', strtotime('-' . $i . ' days'));
+        $day_labels[] = date('M j', strtotime($day));
+        $found = null;
+        foreach ($movement_days as $row) {
+            if ($row['day'] === $day) {
+                $found = $row;
+                break;
+            }
+        }
+        $day_in[] = (int) ($found['qty_in'] ?? 0);
+        $day_out[] = (int) ($found['qty_out'] ?? 0);
+    }
+    ?>
+    <div class="dept-grid">
+        <div class="card">
+            <h3>Stock-in and stock-out, last 7 days</h3>
+            <div class="chart-compact"><canvas id="whMoveChart"></canvas></div>
+        </div>
+        <div class="card">
+            <h3>Items by status</h3>
+            <div class="chart-compact"><canvas id="whStatusChart"></canvas></div>
+        </div>
     </div>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
     <script>
-    new Chart(document.getElementById('whChart'), {
+    new Chart(document.getElementById('whMoveChart'), {
         type: 'bar',
         data: {
-            labels: ['Low stock', 'Incoming', 'Pending release', 'Stock-in qty today', 'Stock-out qty today'],
-            datasets: [{
-                data: [
-                    <?php echo (int) ($stats['low_stock'] ?? 0); ?>,
-                    <?php echo (int) ($stats['incoming_materials'] ?? 0); ?>,
-                    <?php echo (int) ($stats['pending_releases'] ?? 0); ?>,
-                    <?php echo (int) ($stats['stock_in_today'] ?? 0); ?>,
-                    <?php echo (int) ($stats['stock_out_today'] ?? 0); ?>
-                ],
-                backgroundColor: ['#e74a3b', '#36b9cc', '#f6c23e', '#1cc88a', '#4e73df']
-            }]
+            labels: <?php echo json_encode($day_labels); ?>,
+            datasets: [
+                { label: 'Stock-in qty', data: <?php echo json_encode($day_in); ?>, backgroundColor: '#1cc88a' },
+                { label: 'Stock-out qty', data: <?php echo json_encode($day_out); ?>, backgroundColor: '#4e73df' }
+            ]
         },
-        options: { plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true, ticks: { precision: 0 } } } }
+        options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true, ticks: { precision: 0 } } } }
+    });
+    new Chart(document.getElementById('whStatusChart'), {
+        type: 'doughnut',
+        data: {
+            labels: ['In stock', 'Low', 'Out of stock'],
+            datasets: [{ data: [<?php echo (int) (($stats['total_inventory'] ?? 0) - ($stats['low_stock'] ?? 0)); ?>, <?php echo (int) ($stats['low_stock'] ?? 0); ?>, <?php echo (int) ($stats['out_of_stock'] ?? 0); ?>], backgroundColor: ['#1cc88a', '#f6c23e', '#e74a3b'] }]
+        },
+        options: { responsive: true, maintainAspectRatio: false }
     });
     </script>
 

@@ -77,30 +77,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     if (isset($_POST['receive_materials'])) {
-        if (!canReceivePurchasedMaterials()) {
-            $_SESSION['error'] = 'You cannot receive materials.';
-            header('Location: material_requests.php');
-            exit();
-        }
-        $projectId = (int) ($_POST['project_id'] ?? 0);
-        if ($projectId <= 0) {
-            $_SESSION['error'] = 'Select a project.';
-        } else {
-            $received = $pdo->prepare("UPDATE purchase_orders po INNER JOIN purchase_requests pr ON pr.id = po.purchase_request_id SET po.status = 'delivered' WHERE pr.project_id = ? AND po.status = 'ready_for_warehouse'");
-            $received->execute([$projectId]);
-            if ($received->rowCount() < 1) {
-                $_SESSION['error'] = 'Materials cannot be marked received before Accounting sends the order to the Warehouse.';
-            } else {
-                $pdo->prepare("UPDATE purchase_requests SET status = 'completed' WHERE project_id = ? AND status IN ('ordered', 'received')")->execute([$projectId]);
-                $codes = $pdo->prepare("SELECT po.id, po.po_number FROM purchase_orders po INNER JOIN purchase_requests pr ON pr.id = po.purchase_request_id WHERE pr.project_id = ? AND po.status = 'delivered'");
-                $codes->execute([$projectId]);
-                foreach ($codes->fetchAll() as $poRow) {
-                    notify('procurement', 'po_received', 'Purchase order received', $poRow['po_number'] . ' has been received by the Warehouse and is now Completed.', 'modules/procurement/purchase_orders.php', $projectId, 'purchase_order', (int) $poRow['id']);
-                }
-                $_SESSION['success'] = 'Materials received. The purchase order is completed and ready for release to Engineering.';
-            }
-        }
-        header('Location: material_requests.php');
+        $_SESSION['error'] = 'Receive the paid purchase order from Receiving. That adds the materials to stock.';
+        header('Location: receive_purchases.php');
         exit();
     }
 
@@ -438,16 +416,16 @@ include '../../includes/header.php';
                             <?php if ($request['status'] === 'pending' && canWriteDepartmentData('warehouse')): ?>
                                 <?php if (empty($projectReleaseShown[(int) $request['project_id']])): ?>
                                     <?php $projectReleaseShown[(int) $request['project_id']] = true; ?>
-                                    <form method="POST" style="display:inline;">
-                                        <input type="hidden" name="receive_materials" value="1">
-                                        <input type="hidden" name="project_id" value="<?php echo (int) $request['project_id']; ?>">
-                                        <button type="submit" class="btn btn-sm btn-success">Receive Materials</button>
-                                    </form>
+                                    <a href="receive_purchases.php" class="btn btn-sm btn-outline">Receiving</a>
+                                    <?php if ((float) $request['current_stock'] <= 0): ?>
+                                        <span class="badge badge-secondary">Out of stock</span>
+                                    <?php else: ?>
                                     <form method="POST" style="display:inline;" onsubmit="return confirm('Release all pending materials for this project in the requested quantities?');">
                                         <input type="hidden" name="release_project_requests" value="1">
                                         <input type="hidden" name="project_id" value="<?php echo (int) $request['project_id']; ?>">
                                         <button type="submit" class="btn btn-sm btn-primary"><i class="fas fa-arrow-up"></i> Release all to site</button>
                                     </form>
+                                    <?php endif; ?>
                                 <?php endif; ?>
                                 <?php if ((int) $request['current_stock'] < (int) $request['quantity'] && empty($request['purchase_request_id'])): ?>
                                     <form method="POST" style="display:inline;">

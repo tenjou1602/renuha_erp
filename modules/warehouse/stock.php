@@ -13,7 +13,8 @@ try {
     error_log('[Runeha ERP] fifo schema: ' . $e->getMessage());
 }
 
-$page_title = 'Stock Management';
+$stock_action = $_GET['action'] ?? 'list';
+$page_title = $stock_action === 'out' ? 'Stock-Out' : ($stock_action === 'in' ? 'Stock-In' : 'Inventory');
 $action = $_GET['action'] ?? 'list';
 $id = (int)($_GET['id'] ?? 0);
 
@@ -29,6 +30,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $item_id = (int) ($_POST['item_id'] ?? 0);
         $expiration = trim($_POST['expiration_date'] ?? '');
         $location = trim($_POST['location'] ?? '');
+        if ($location === '' || mb_strlen($location) < 2) {
+            $_SESSION['error'] = 'Location is required. Enter the shelf, bin, or area.';
+            header('Location: stock.php?action=in');
+            exit();
+        }
         $notes = trim($_POST['notes'] ?? '');
         try {
             $stmt = $pdo->prepare("
@@ -36,7 +42,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                        po.po_number, po.status
                 FROM purchase_order_items poi
                 INNER JOIN purchase_orders po ON po.id = poi.purchase_order_id
-                WHERE poi.id = ? AND po.status IN ('sent', 'confirmed', 'ready_for_warehouse')
+                WHERE poi.id = ? AND po.status = 'ready_for_warehouse' AND po.received_at IS NULL
             ");
             $stmt->execute([$item_id]);
             $item = $stmt->fetch();
@@ -81,8 +87,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
-$stock_action = $_GET['action'] ?? '';
-
 // Get incoming purchase lines. Quantity and batch come from the order.
 $incoming_lines = [];
 try {
@@ -94,7 +98,8 @@ try {
         INNER JOIN materials m ON m.id = poi.material_id
         LEFT JOIN purchase_requests pr ON pr.id = po.purchase_request_id
         LEFT JOIN projects p ON p.id = pr.project_id
-        WHERE po.status IN ('sent', 'confirmed', 'ready_for_warehouse')
+        WHERE po.status = 'ready_for_warehouse'
+          AND po.received_at IS NULL
           AND poi.received_quantity < poi.quantity
         ORDER BY po.po_number, m.name
     ")->fetchAll();
@@ -136,6 +141,7 @@ try {
         LEFT JOIN warehouse_stock ws ON ws.material_id = m.id
         WHERE m.status = 'active'
           AND (ws.id IS NOT NULL OR m.current_stock <> 0)
+          AND (COALESCE(ws.quantity, m.current_stock) > 0 OR " . (!empty($_GET['show_empty']) ? '1=1' : '0=1') . ")
         ORDER BY ws.created_at ASC, ws.id ASC
     ";
     $warehouse_stock = $pdo->query($query)->fetchAll();
@@ -149,8 +155,8 @@ include '../../includes/header.php';
 <div class="page-header">
     <h1><i class="fas fa-warehouse"></i> <?php echo $page_title; ?></h1>
     <div style="display:flex;gap:0.5rem;flex-wrap:wrap;">
-        <a href="receive_purchases.php" class="btn btn-outline"><i class="fas fa-truck-loading"></i> Receive Purchases</a>
-        <a href="material_requests.php" class="btn btn-outline"><i class="fas fa-box-open"></i> Inventory Release</a>
+        <a href="receive_purchases.php" class="btn btn-outline"><i class="fas fa-truck-loading"></i> Receiving</a>
+        <a href="material_requests.php" class="btn btn-outline"><i class="fas fa-box-open"></i> Material Release</a>
         <a href="movements.php" class="btn btn-outline"><i class="fas fa-exchange-alt"></i> Movements</a>
     </div>
 </div>
@@ -173,7 +179,7 @@ include '../../includes/header.php';
     <h3><i class="fas fa-arrow-down"></i> Receive Stock</h3>
     <p style="color:#64748b;">Quantity comes from the purchase order. The batch number is assigned automatically for FIFO: the oldest batch is issued first. Expiration can be left blank.</p>
     <?php if (!$incoming_lines): ?>
-        <p style="color:#94a3b8;">No purchase order is waiting. When Procurement sends one, the material, quantity, and batch appear here.</p>
+        <p style="color:#94a3b8;">No paid purchase order is waiting. Materials appear here after Accounting marks the PO paid.</p>
     <?php else: ?>
         <?php $batchPreview = 1; ?>
         <?php foreach ($incoming_lines as $line): ?>
@@ -207,8 +213,8 @@ include '../../includes/header.php';
                 </div>
                 <div class="form-row">
                     <div class="form-group">
-                        <label>Warehouse location</label>
-                        <input type="text" name="location" placeholder="Aisle / shelf, optional">
+                        <label class="required">Location</label>
+                        <input type="text" name="location" required minlength="2" placeholder="Shelf, bin, or area">
                     </div>
                     <div class="form-group">
                         <label>Notes</label>
@@ -251,6 +257,7 @@ include '../../includes/header.php';
 </div>
 <?php endif; ?>
 
+<?php if (!in_array($stock_action, ['in', 'out'], true)): ?>
 <!-- Warehouse Stock List -->
 <div class="card">
     <h3><i class="fas fa-list"></i> Warehouse stock, FIFO</h3>
@@ -287,7 +294,11 @@ include '../../includes/header.php';
                         <td><?php echo date('M d, Y', strtotime($item['created_at'])); ?></td>
                         <td>
                             <a href="inventory_history.php?material_id=<?php echo (int) $item['material_id']; ?>" class="btn btn-sm btn-info">History</a>
-                            <a href="material_requests.php" class="btn btn-sm btn-warning">Release</a>
+                            <?php if ((float) $item['quantity'] <= 0): ?>
+                                <span class="badge badge-secondary">Out of stock</span>
+                            <?php else: ?>
+                                <a href="material_requests.php" class="btn btn-sm btn-warning">Release</a>
+                            <?php endif; ?>
                         </td>
                     </tr>
                     <?php endforeach; ?>
@@ -296,6 +307,8 @@ include '../../includes/header.php';
         </div>
     <?php endif; ?>
 </div>
+<p style="margin-top:.5rem;"><a href="stock.php?show_empty=1">Show empty batches</a></p>
+<?php endif; ?>
 <?php if (in_array($stock_action, ['in', 'out'], true)): ?>
 <script>
 document.getElementById(<?php echo json_encode($stock_action === 'out' ? 'stock-out' : 'stock-in'); ?>)?.scrollIntoView({behavior:'smooth', block:'start'});

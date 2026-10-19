@@ -12,7 +12,7 @@ try {
     error_log('[Runeha ERP] fifo schema: ' . $e->getMessage());
 }
 
-$page_title = 'Receive Purchases';
+$page_title = 'Receiving';
 
 function receivePurchaseLineItems(PDO $pdo, array $po): array {
     $items = [];
@@ -43,11 +43,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['receive_po'])) {
     }
     $po_id = (int)($_POST['po_id'] ?? 0);
     try {
-        $stmt = $pdo->prepare("SELECT * FROM purchase_orders WHERE id = ? AND status IN ('sent', 'confirmed', 'ready_for_warehouse')");
+        $stmt = $pdo->prepare("SELECT * FROM purchase_orders WHERE id = ? AND status = 'ready_for_warehouse' AND received_at IS NULL");
         $stmt->execute([$po_id]);
         $po = $stmt->fetch();
         if (!$po) {
-            $_SESSION['error'] = 'This purchase order is not waiting to be received.';
+            $_SESSION['error'] = 'This purchase order is not ready to receive. Accounting must mark the materials paid first.';
         } else {
             $items = receivePurchaseLineItems($pdo, $po);
             if (empty($items)) {
@@ -66,10 +66,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['receive_po'])) {
                     } catch (PDOException $e) {
                     }
                 }
-                $pdo->prepare("UPDATE purchase_orders SET status = 'delivered', received_at = NOW() WHERE id = ?")->execute([$po_id]);
+                $pdo->prepare("UPDATE purchase_orders SET status = 'delivered', received_at = NOW() WHERE id = ? AND status <> 'delivered'")->execute([$po_id]);
                 if (!empty($po['purchase_request_id'])) {
-                    $pdo->prepare("UPDATE purchase_requests SET status = 'received' WHERE id = ?")->execute([$po['purchase_request_id']]);
+                    $pdo->prepare("UPDATE purchase_requests SET status = 'completed' WHERE id = ?")->execute([$po['purchase_request_id']]);
                 }
+                notify('procurement', 'po_delivered', 'Purchase order delivered', $po['po_number'] . ' was received by Warehouse and is now completed.', 'modules/procurement/purchase_orders.php', null, 'purchase_order', $po_id);
+                notify('accounting', 'po_delivered', 'Purchase order delivered', $po['po_number'] . ' was received by Warehouse. Record the supplier payment when the invoice is ready.', 'modules/accounting/expenses.php', null, 'purchase_order', $po_id);
                 $pdo->commit();
                 try {
                     syncReceivedOrdersForRelease($pdo);
@@ -91,15 +93,34 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['receive_po'])) {
     exit();
 }
 
+$receive_filter = $_GET['status'] ?? 'all';
+if (!in_array($receive_filter, ['all', 'pending', 'delivered'], true)) {
+    $receive_filter = 'all';
+}
+$status_sql = "po.status IN ('ready_for_warehouse', 'delivered')";
+if ($receive_filter === 'pending') {
+    $status_sql = "po.status = 'ready_for_warehouse'";
+} elseif ($receive_filter === 'delivered') {
+    $status_sql = "po.status = 'delivered'";
+}
+$po_materials = purchaseOrderMaterialsByOrder($pdo);
 $orders = [];
 try {
     $orders = $pdo->query("
-        SELECT po.*, pr.pr_number, p.project_code, p.name AS project_name
+        SELECT po.*, pr.pr_number, p.project_code, p.name AS project_name,
+               s.company_name AS supplier_company
         FROM purchase_orders po
         LEFT JOIN purchase_requests pr ON po.purchase_request_id = pr.id
-        LEFT JOIN projects p ON pr.project_id = p.id
-        WHERE po.status IN ('sent', 'confirmed', 'ready_for_warehouse', 'delivered')
-        ORDER BY FIELD(po.status, 'ready_for_warehouse', 'confirmed', 'sent', 'delivered'), po.created_at DESC
+        LEFT JOIN projects p ON COALESCE(po.project_id, pr.project_id) = p.id
+        LEFT JOIN suppliers s ON s.id = (
+            SELECT s2.id FROM suppliers s2
+            WHERE LOWER(s2.name) = LOWER(po.supplier)
+               OR (s2.company_name IS NOT NULL AND LOWER(s2.company_name) = LOWER(po.supplier))
+            ORDER BY s2.id
+            LIMIT 1
+        )
+        WHERE $status_sql
+        ORDER BY FIELD(po.status, 'ready_for_warehouse', 'delivered'), po.created_at DESC
     ")->fetchAll();
 } catch (PDOException $e) {
     $error = userDatabaseError($e, 'Warehouse');
@@ -109,8 +130,8 @@ include '../../includes/header.php';
 ?>
 
 <div class="page-header">
-    <h1><i class="fas fa-truck-loading"></i> Receive Purchases</h1>
-    <a href="stock.php?action=in" class="btn btn-outline">Manual Stock-In</a>
+    <h1><i class="fas fa-truck-loading"></i> Receiving</h1>
+    <a href="stock.php?action=in" class="btn btn-outline">Stock-In</a>
     <a href="movements.php" class="btn btn-outline">Movements</a>
 </div>
 
@@ -124,7 +145,12 @@ include '../../includes/header.php';
     <div class="alert alert-danger"><?php echo htmlspecialchars($error); ?></div>
 <?php endif; ?>
 
-<p class="muted-note">Incoming purchase orders from Procurement. Receiving increments material stock and logs a stock-in movement.</p>
+<p class="muted-note">A purchase order appears here after Accounting marks its materials paid. Receive Materials adds those items to stock.</p>
+<p>
+    <a class="btn btn-sm <?php echo $receive_filter === 'all' ? 'btn-primary' : 'btn-outline'; ?>" href="receive_purchases.php">All</a>
+    <a class="btn btn-sm <?php echo $receive_filter === 'pending' ? 'btn-primary' : 'btn-outline'; ?>" href="receive_purchases.php?status=pending">For receiving</a>
+    <a class="btn btn-sm <?php echo $receive_filter === 'delivered' ? 'btn-primary' : 'btn-outline'; ?>" href="receive_purchases.php?status=delivered">Delivered</a>
+</p>
 
 <div class="card">
     <div class="table-responsive">
@@ -132,6 +158,7 @@ include '../../includes/header.php';
             <thead>
                 <tr>
                     <th>PO #</th>
+                    <th>Materials</th>
                     <th>PR #</th>
                     <th>Project</th>
                     <th>Supplier</th>
@@ -141,20 +168,29 @@ include '../../includes/header.php';
             </thead>
             <tbody>
                 <?php if (empty($orders)): ?>
-                    <tr><td colspan="6" class="table-empty">No purchase orders to receive.</td></tr>
+                    <tr><td colspan="7" class="table-empty">No paid purchase orders are waiting. They appear after Accounting marks the materials paid.</td></tr>
                 <?php else: ?>
                     <?php foreach ($orders as $order): ?>
                     <tr id="po-<?php echo (int) $order['id']; ?>" <?php echo (int) ($_GET['po'] ?? 0) === (int) $order['id'] ? 'style="outline:2px solid #4e73df;"' : ''; ?>>
                         <td><strong><?php echo htmlspecialchars($order['po_number']); ?></strong></td>
+                        <td>
+                            <?php foreach ($po_materials[(int) $order['id']] ?? [] as $line): ?>
+                                <div><?php echo htmlspecialchars(($line['material_name'] ?: 'Material') . ' × ' . (int) $line['quantity'] . ' ' . ($line['unit'] ?? '')); ?></div>
+                            <?php endforeach; ?>
+                            <?php if (empty($po_materials[(int) $order['id']])): ?><span style="color:#94a3b8;">No materials on this PO</span><?php endif; ?>
+                        </td>
                         <td><?php echo htmlspecialchars($order['pr_number'] ?? '—'); ?></td>
                         <td><?php echo htmlspecialchars(trim(($order['project_code'] ?? '') . ' ' . ($order['project_name'] ?? '')) ?: '—'); ?></td>
-                        <td><?php echo htmlspecialchars($order['supplier']); ?></td>
-                        <td><span class="badge badge-<?php echo htmlspecialchars($order['status']); ?>"><?php echo ucfirst(str_replace('_', ' ', $order['status'])); ?></span></td>
+                        <td><?php echo htmlspecialchars($order['supplier_company'] ?? '') !== '' ? htmlspecialchars($order['supplier_company']) : 'Company name not set'; ?><div style="color:#64748b;font-size:0.8rem;"><?php echo htmlspecialchars($order['supplier']); ?></div></td>
+                        <td><?php
+                            $whLabel = $order['status'] === 'delivered' ? 'Delivered' : 'For receiving';
+                            echo '<span class="badge badge-' . ($whLabel === 'Delivered' ? 'success' : 'warning') . '">' . $whLabel . '</span>';
+                        ?></td>
                         <td>
-                            <?php if (in_array($order['status'], ['sent', 'confirmed', 'ready_for_warehouse'], true) && canWriteDepartmentData('warehouse')): ?>
+                            <?php if ($order['status'] === 'ready_for_warehouse' && canWriteDepartmentData('warehouse')): ?>
                             <form method="POST" style="display:inline;" onsubmit="return confirm('Receive this PO and add quantities to stock?');">
                                 <input type="hidden" name="po_id" value="<?php echo (int)$order['id']; ?>">
-                                <button type="submit" name="receive_po" class="btn btn-sm btn-primary">Receive</button>
+                                <button type="submit" name="receive_po" class="btn btn-sm btn-primary">Receive Materials</button>
                             </form>
                             <?php else: ?>
                             <a href="movements.php" class="btn btn-sm btn-info">Movements</a>

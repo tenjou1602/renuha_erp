@@ -353,7 +353,7 @@ new Chart(document.getElementById('contractChart'), {
     <div style="margin-top:1.5rem; display:flex; gap:0.5rem; flex-wrap:wrap;">
         <?php if (canWriteDepartmentData('accounting')): ?><a href="?action=edit&id=<?php echo $contract_details['id']; ?>" class="btn btn-warning"><i class="fas fa-edit"></i> Edit</a><?php endif; ?>
         <?php if (($contract_details['status'] ?? '') === 'active' && empty($contract_details['project_id'])): ?>
-            <a href="<?php echo APP_URL; ?>modules/projects/projects.php?action=add&source=contract:<?php echo (int) $contract_details['id']; ?>" class="btn btn-primary"><i class="fas fa-building"></i> Encode Project</a>
+            <a href="<?php echo APP_URL; ?>modules/projects/projects.php?action=add&source=contract:<?php echo (int) $contract_details['id']; ?>" class="btn btn-primary"><i class="fas fa-building"></i> Create Project</a>
         <?php endif; ?>
         <?php if (canWriteDepartmentData('accounting')): ?><a href="?action=delete&delete_id=<?php echo $contract_details['id']; ?>" class="btn btn-danger" onclick="return confirm('Are you sure you want to delete this contract?')"><i class="fas fa-trash"></i> Delete</a><?php endif; ?>
         <a href="contracts.php" class="btn btn-secondary"><i class="fas fa-arrow-left"></i> Back</a>
@@ -413,7 +413,7 @@ new Chart(document.getElementById('contractChart'), {
                             <div style="display:flex; gap:0.3rem; flex-wrap:wrap;">
                                 <a href="?action=view&id=<?php echo $contract['id']; ?>" class="btn btn-sm btn-info" title="View"><i class="fas fa-eye"></i></a>
                                 <?php if (($contract['status'] ?? '') === 'active' && empty($contract['project_id'])): ?>
-                                    <a href="<?php echo APP_URL; ?>modules/projects/projects.php?action=add&source=contract:<?php echo (int) $contract['id']; ?>" class="btn btn-sm btn-primary" title="Encode project">Encode</a>
+                                    <a href="<?php echo APP_URL; ?>modules/projects/projects.php?action=add&source=contract:<?php echo (int) $contract['id']; ?>" class="btn btn-sm btn-primary" title="Create project">Create</a>
                                 <?php endif; ?>
                                 <?php if (canWriteDepartmentData('accounting')): ?><a href="?action=edit&id=<?php echo $contract['id']; ?>" class="btn btn-sm btn-warning" title="Edit"><i class="fas fa-edit"></i></a><?php endif; ?>
                                 <?php if (canWriteDepartmentData('accounting')): ?><a href="?action=delete&delete_id=<?php echo $contract['id']; ?>" class="btn btn-sm btn-danger" title="Delete" onclick="return confirm('Delete this contract?')"><i class="fas fa-trash"></i></a><?php endif; ?>

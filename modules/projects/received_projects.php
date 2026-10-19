@@ -19,10 +19,7 @@ function engineeringMaterialId(string $name, string $unit, float $cost): int
     if ($existing) {
         return (int) $existing;
     }
-    $code = 'MAT-' . strtoupper(bin2hex(random_bytes(3)));
-    $insert = $pdo->prepare("INSERT INTO materials (material_code, name, unit, cost_per_unit, status, created_by) VALUES (?, ?, ?, ?, 'active', ?)");
-    $insert->execute([$code, $name, $unit !== '' ? $unit : 'pcs', $cost, $_SESSION['user_id'] ?? null]);
-    return (int) $pdo->lastInsertId();
+    throw new RuntimeException('"' . $name . '" is not in inventory. Warehouse adds a material when a purchase is received, or from Inventory.');
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['receive_project'])) {
@@ -30,10 +27,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['receive_project'])) {
         $_SESSION['error'] = 'Administrators have view-only access.';
     } else {
         $id = (int) ($_POST['project_id'] ?? 0);
-        $pdo->prepare("UPDATE projects SET engineering_received_at = NOW() WHERE id = ? AND engineering_received_at IS NULL")->execute([$id]);
-        $_SESSION['success'] = 'Project received. You can request the quotation materials from Procurement.';
+        try {
+            $stmt = $pdo->prepare("UPDATE projects SET engineering_received_at = NOW() WHERE id = ? AND engineering_received_at IS NULL");
+            $stmt->execute([$id]);
+            $check = $pdo->prepare("SELECT engineering_received_at FROM projects WHERE id = ?");
+            $check->execute([$id]);
+            if ($check->fetchColumn()) {
+                $_SESSION['success'] = 'Project received. The Receive button is closed. You can send the material request to Procurement.';
+            } else {
+                $_SESSION['error'] = 'The project could not be received. Refresh the page and try again.';
+            }
+        } catch (PDOException $e) {
+            $_SESSION['error'] = userDatabaseError($e, 'Projects');
+        }
     }
-    header('Location: received_projects.php?id=' . (int) ($_POST['project_id'] ?? 0));
+    header('Location: received_projects.php');
     exit();
 }
 
@@ -348,10 +356,10 @@ foreach ($engineer_requests as $request) {
                         <a class="btn btn-sm btn-outline" href="material_requirements.php?project_id=<?php echo (int) $project['id']; ?>">Warehouse</a>
                         <a class="btn btn-sm btn-outline" href="accomplishments.php">Progress</a>
                         <?php if (empty($project['engineering_received_at']) && canWriteDepartmentData('projects')): ?>
-                            <form method="POST" style="display:inline;">
+                            <form method="POST" action="received_projects.php" style="display:inline;">
                                 <input type="hidden" name="receive_project" value="1">
                                 <input type="hidden" name="project_id" value="<?php echo (int) $project['id']; ?>">
-                                <button class="btn btn-sm btn-success" type="submit">Receive</button>
+                                <button class="btn btn-sm btn-success" type="submit" name="receive_project_button" value="1">Receive</button>
                             </form>
                         <?php endif; ?>
                     </td>

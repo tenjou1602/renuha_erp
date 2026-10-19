@@ -45,7 +45,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
     if (isset($_POST['add_supplier']) || isset($_POST['update_supplier'])) {
         $name = trim($_POST['name'] ?? '');
-        $contact_person = trim($_POST['contact_person'] ?? '');
+        $company_name = trim($_POST['company_name'] ?? '');
         $phone = trim($_POST['phone'] ?? '');
         $email = trim($_POST['email'] ?? '');
         $address = trim($_POST['address'] ?? '');
@@ -54,19 +54,36 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         
         $errors = [];
         if (empty($name)) $errors[] = 'Supplier name is required.';
-        if (!empty($email) && !filter_var($email, FILTER_VALIDATE_EMAIL)) $errors[] = 'Invalid email format.';
+        if ($company_name === '' || mb_strlen($company_name) < 2) {
+            $errors[] = 'Company name is required.';
+        } elseif (mb_strlen($company_name) > 150) {
+            $errors[] = 'Company name is required.';
+        }
+        if ($phone !== '' && !preg_match('/^[0-9+\s\-]+$/', $phone)) {
+            $errors[] = 'Phone may contain only digits, spaces, plus signs, and dashes.';
+        }
+        if ($email !== '' && !filter_var($email, FILTER_VALIDATE_EMAIL)) {
+            $errors[] = 'Enter a valid email address.';
+        }
+        if (!$errors) {
+            $dup = $pdo->prepare("SELECT id FROM suppliers WHERE (LOWER(company_name) = LOWER(?) OR LOWER(name) = LOWER(?)) AND id <> ? LIMIT 1");
+            $dup->execute([$company_name, $company_name, isset($_POST['update_supplier']) ? $id : 0]);
+            if ($dup->fetch()) {
+                $errors[] = 'A supplier with this company name already exists.';
+            }
+        }
         
         if (empty($errors)) {
             try {
                 if (isset($_POST['add_supplier'])) {
-                    $stmt = $pdo->prepare("INSERT INTO suppliers (name, contact_person, phone, email, address, tin_number, status, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
-                    $stmt->execute([$name, $contact_person, $phone, $email, $address, $tin_number, $status, $_SESSION['user_id']]);
+                    $stmt = $pdo->prepare("INSERT INTO suppliers (name, company_name, phone, email, address, tin_number, status, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+                    $stmt->execute([$name, $company_name, $phone, $email, $address, $tin_number, $status, $_SESSION['user_id']]);
                     
                     logActivity($_SESSION['user_id'], 'Created supplier', 'Procurement', "Supplier: $name");
                     $_SESSION['success'] = "Supplier created successfully!";
                 } else {
-                    $stmt = $pdo->prepare("UPDATE suppliers SET name = ?, contact_person = ?, phone = ?, email = ?, address = ?, tin_number = ?, status = ? WHERE id = ?");
-                    $stmt->execute([$name, $contact_person, $phone, $email, $address, $tin_number, $status, $id]);
+                    $stmt = $pdo->prepare("UPDATE suppliers SET name = ?, company_name = ?, phone = ?, email = ?, address = ?, tin_number = ?, status = ? WHERE id = ?");
+                    $stmt->execute([$name, $company_name, $phone, $email, $address, $tin_number, $status, $id]);
                     
                     logActivity($_SESSION['user_id'], 'Updated supplier', 'Procurement', "Supplier: $name");
                     $_SESSION['success'] = "Supplier updated successfully!";
@@ -76,6 +93,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             } catch (PDOException $e) {
                 $error = userDatabaseError($e);
             }
+        } else {
+            $error = implode(' ', $errors);
         }
     }
 }
@@ -190,22 +209,22 @@ include '../../includes/header.php';
         <div class="form-row">
             <div class="form-group">
                 <label class="required">Supplier Name</label>
-                <input type="text" name="name" required value="<?php echo htmlspecialchars($supplier_details['name'] ?? ''); ?>" placeholder="Enter supplier name">
+                <input type="text" name="name" required value="<?php echo htmlspecialchars($_POST['name'] ?? ($supplier_details['name'] ?? '')); ?>" placeholder="Enter supplier name">
             </div>
             <div class="form-group">
-                <label>Contact Person</label>
-                <input type="text" name="contact_person" value="<?php echo htmlspecialchars($supplier_details['contact_person'] ?? ''); ?>" placeholder="Contact person name">
+                <label class="required">Company Name</label>
+                <input type="text" name="company_name" required minlength="2" maxlength="150" value="<?php echo htmlspecialchars($_POST['company_name'] ?? ($supplier_details['company_name'] ?? '')); ?>" placeholder="Registered company name">
             </div>
         </div>
         
         <div class="form-row">
             <div class="form-group">
                 <label>Phone</label>
-                <input type="text" name="phone" value="<?php echo htmlspecialchars($supplier_details['phone'] ?? ''); ?>" placeholder="Phone number">
+                <input type="text" name="phone" pattern="[0-9+\s\-]*" value="<?php echo htmlspecialchars($_POST['phone'] ?? ($supplier_details['phone'] ?? '')); ?>" placeholder="Phone number">
             </div>
             <div class="form-group">
                 <label>Email</label>
-                <input type="email" name="email" value="<?php echo htmlspecialchars($supplier_details['email'] ?? ''); ?>" placeholder="Email address">
+                <input type="email" name="email" value="<?php echo htmlspecialchars($_POST['email'] ?? ($supplier_details['email'] ?? '')); ?>" placeholder="Email address">
             </div>
         </div>
         
@@ -237,7 +256,7 @@ include '../../includes/header.php';
     <h3>Supplier Details</h3>
     <div class="view-details">
         <div class="detail-row"><span>Name:</span> <strong><?php echo htmlspecialchars($supplier_details['name']); ?></strong></div>
-        <div class="detail-row"><span>Contact Person:</span> <?php echo htmlspecialchars($supplier_details['contact_person'] ?? 'N/A'); ?></div>
+        <div class="detail-row"><span>Company Name:</span> <?php echo htmlspecialchars($supplier_details['company_name'] ?? '') !== '' ? htmlspecialchars($supplier_details['company_name']) : 'Company name not set'; ?></div>
         <div class="detail-row"><span>Phone:</span> <?php echo htmlspecialchars($supplier_details['phone'] ?? 'N/A'); ?></div>
         <div class="detail-row"><span>Email:</span> <?php echo htmlspecialchars($supplier_details['email'] ?? 'N/A'); ?></div>
         <div class="detail-row"><span>Address:</span> <?php echo nl2br(htmlspecialchars($supplier_details['address'] ?? '')); ?></div>
@@ -266,7 +285,7 @@ include '../../includes/header.php';
             <thead>
                 <tr>
                     <th onclick="sortTable('supplierTable', 0)" style="cursor:pointer;">Name <i class="fas fa-sort"></i></th>
-                    <th onclick="sortTable('supplierTable', 1)" style="cursor:pointer;">Contact Person <i class="fas fa-sort"></i></th>
+                    <th onclick="sortTable('supplierTable', 1)" style="cursor:pointer;">Company Name <i class="fas fa-sort"></i></th>
                     <th onclick="sortTable('supplierTable', 2)" style="cursor:pointer;">Phone <i class="fas fa-sort"></i></th>
                     <th onclick="sortTable('supplierTable', 3)" style="cursor:pointer;">Email <i class="fas fa-sort"></i></th>
                     <th onclick="sortTable('supplierTable', 4)" style="cursor:pointer;">Status <i class="fas fa-sort"></i></th>
@@ -285,7 +304,7 @@ include '../../includes/header.php';
                     <?php foreach ($suppliers as $supplier): ?>
                     <tr>
                         <td><strong><?php echo htmlspecialchars($supplier['name']); ?></strong></td>
-                        <td><?php echo htmlspecialchars($supplier['contact_person'] ?? 'N/A'); ?></td>
+                        <td><?php echo htmlspecialchars($supplier['company_name'] ?? '') !== '' ? htmlspecialchars($supplier['company_name']) : 'Company name not set'; ?></td>
                         <td><?php echo htmlspecialchars($supplier['phone'] ?? 'N/A'); ?></td>
                         <td><?php echo htmlspecialchars($supplier['email'] ?? 'N/A'); ?></td>
                         <td><span class="badge badge-<?php echo ($supplier['status'] ?? 'active') == 'active' ? 'success' : 'secondary'; ?>"><?php echo ucfirst($supplier['status'] ?? 'Active'); ?></span></td>

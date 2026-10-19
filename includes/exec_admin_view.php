@@ -27,10 +27,11 @@ $dept_dot = [
 .exec-dash .exec-head h1 { font-size:1.55rem; font-weight:800; letter-spacing:-.03em; margin:0; }
 .exec-dash .exec-head p { color:#64748b; margin:.25rem 0 0; font-size:.9rem; }
 .exec-dash .exec-date { color:#94a3b8; font-size:.85rem; font-weight:600; white-space:nowrap; }
-.exec-kpis { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:.9rem; margin-bottom:1rem; }
+.exec-kpis { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:.9rem; margin-bottom:1rem; }
 .exec-kpi { background:#fff; border-radius:16px; padding:1rem 1.1rem; box-shadow:0 8px 24px rgba(15,23,42,.04); display:flex; align-items:center; gap:.85rem; border:1px solid #eef2f7; }
 .exec-kpi .ico { width:42px; height:42px; border-radius:12px; display:flex; align-items:center; justify-content:center; font-size:1.05rem; flex-shrink:0; }
-.exec-kpi .num { font-size:1.55rem; font-weight:800; line-height:1; }
+.exec-kpi { min-width:0; }
+.exec-kpi .num, .exec-funds .v { font-size:clamp(1.1rem, 1.6vw, 1.5rem); font-weight:800; line-height:1.2; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:100%; }
 .exec-kpi .lbl { font-size:.72rem; color:#64748b; font-weight:600; margin-top:.2rem; }
 .exec-kpi.blue .ico { background:#dbeafe; color:#2563eb; }
 .exec-kpi.green .ico { background:#d1fae5; color:#059669; }
@@ -144,10 +145,10 @@ $dept_dot = [
         <div class="exec-card">
             <h3><i class="fas fa-coins"></i> Financial Overview</h3>
             <div class="exec-fin">
-                <div class="c1"><div class="k">Total Contract Value</div><div class="v">₱<?php echo number_format((float)($stats['contract_value'] ?? 0), 0); ?></div></div>
-                <div class="c2"><div class="k">Total Collected</div><div class="v">₱<?php echo number_format((float)($stats['collected'] ?? 0), 0); ?></div></div>
-                <div class="c3"><div class="k">Total Expenses</div><div class="v">₱<?php echo number_format((float)($stats['total_project_expenses'] ?? 0), 0); ?></div></div>
-                <div class="c4"><div class="k">Available Funds</div><div class="v">₱<?php echo number_format((float)($stats['available_funds'] ?? 0), 0); ?></div></div>
+                <div class="c1"><div class="k">Total Contract Value</div><div class="v" title="₱<?php echo number_format((float)($stats['contract_value'] ?? 0), 2); ?>"><?php echo formatCompactMoney($stats['contract_value'] ?? 0); ?></div></div>
+                <div class="c2"><div class="k">Total Collected</div><div class="v" title="₱<?php echo number_format((float)($stats['collected'] ?? 0), 2); ?>"><?php echo formatCompactMoney($stats['collected'] ?? 0); ?></div></div>
+                <div class="c3"><div class="k">Total Expenses</div><div class="v" title="₱<?php echo number_format((float)($stats['total_project_expenses'] ?? 0), 2); ?>"><?php echo formatCompactMoney($stats['total_project_expenses'] ?? 0); ?></div></div>
+                <div class="c4"><div class="k">Available Funds</div><div class="v" title="₱<?php echo number_format((float)($stats['available_funds'] ?? 0), 2); ?>"><?php echo formatCompactMoney($stats['available_funds'] ?? 0); ?></div></div>
             </div>
         </div>
         <div class="exec-card">
@@ -158,6 +159,7 @@ $dept_dot = [
                 <div class="exec-row"><span><span class="exec-dot" style="background:#8b5cf6"></span>Ongoing Purchases</span><strong><?php echo number_format((int)($stats['pending_pos'] ?? 0)); ?></strong></div>
                 <div class="exec-row"><span><span class="exec-dot" style="background:#22c55e"></span>Completed Purchases</span><strong><?php echo number_format((int)($stats['completed_purchases'] ?? 0)); ?></strong></div>
             </div>
+
         </div>
         <div class="exec-card">
             <h3><i class="fas fa-warehouse"></i> Warehouse / Inventory Status</h3>
@@ -238,6 +240,7 @@ $dept_dot = [
                             <th>Name</th>
                             <th>Client</th>
                             <th>Status</th>
+                            <th>Accounting</th>
                             <th>Progress</th>
                             <th>Project In-Charge</th>
                         </tr>
@@ -252,6 +255,7 @@ $dept_dot = [
                             <td><?php echo htmlspecialchars($project['name']); ?></td>
                             <td><?php echo htmlspecialchars($project['client'] ?? $project['location'] ?? '—'); ?></td>
                             <td><span class="exec-badge <?php echo htmlspecialchars($st); ?>"><?php echo ucfirst(str_replace('_', ' ', $st)); ?></span></td>
+                            <td><?php echo accountingDecisionView(accountingDecisionLabel($project['accounting_status'] ?? '')); ?></td>
                             <td>
                                 <div class="exec-pbar">
                                     <div class="track"><span class="fill <?php echo $st === 'completed' ? 'done' : ''; ?>" style="width:<?php echo number_format($pct, 1); ?>%"></span></div>
@@ -269,7 +273,7 @@ $dept_dot = [
         <div class="exec-card">
             <h3>Quick Actions</h3>
             <div class="exec-qa">
-                <a class="t1" href="<?php echo APP_URL; ?>modules/projects/projects.php?action=add"><i class="fas fa-plus"></i>Encode Project</a>
+                <a class="t1" href="<?php echo APP_URL; ?>modules/projects/projects.php?action=add"><i class="fas fa-plus"></i>Create Project</a>
                 <a class="t2" href="<?php echo APP_URL; ?>modules/accounting/quotations.php"><i class="fas fa-file-signature"></i>Project Quotation</a>
                 <a class="t3" href="<?php echo APP_URL; ?>modules/projects/projects.php"><i class="fas fa-tasks"></i>Project Monitoring</a>
                 <a class="t4" href="<?php echo APP_URL; ?>modules/admin/department_monitoring.php"><i class="fas fa-eye"></i>Department Status</a>

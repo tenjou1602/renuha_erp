@@ -8,27 +8,14 @@ $page_title = 'Project Financial Records';
 $action = $_GET['action'] ?? 'list';
 $id = (int)($_GET['id'] ?? 0);
 
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['receive_project']) || isset($_POST['reject_project']))) {
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['set_accounting_decision'])) {
     if (!canWriteDepartmentData('accounting')) {
         $_SESSION['error'] = 'You cannot update project financial status.';
     } else {
-        $projectId = (int) ($_POST['project_id'] ?? 0);
-        if (isset($_POST['reject_project'])) {
-            $stmt = $pdo->prepare("UPDATE projects SET accounting_status = 'rejected' WHERE id = ? AND accounting_status = 'pending'");
-            $stmt->execute([$projectId]);
-            if ($stmt->rowCount() === 1) {
-                notifyProjectRejected($projectId);
-                $_SESSION['success'] = 'Project rejected.';
-            }
-        } else {
-            $stmt = $pdo->prepare("UPDATE projects SET accounting_status = 'received', accounting_received_at = COALESCE(accounting_received_at, NOW()) WHERE id = ? AND accounting_status = 'pending'");
-            $stmt->execute([$projectId]);
-            if ($stmt->rowCount() === 1) {
-                $pdo->prepare("UPDATE material_requests SET flow_status = 'warehouse' WHERE project_id = ? AND flow_status = 'accounting'")->execute([$projectId]);
-                $pdo->prepare("UPDATE purchase_orders po INNER JOIN purchase_requests pr ON pr.id = po.purchase_request_id SET po.status = 'ready_for_warehouse' WHERE pr.project_id = ? AND po.status IN ('sent', 'confirmed')")->execute([$projectId]);
-                notifyAccountingReceived($projectId);
-                $_SESSION['success'] = 'Project received.';
-            }
+        try {
+            $_SESSION['success'] = setAccountingProjectDecision($pdo, (int) ($_POST['project_id'] ?? 0), (string) ($_POST['decision'] ?? ''));
+        } catch (Throwable $e) {
+            $_SESSION['error'] = $e instanceof PDOException ? userDatabaseError($e, 'Accounting') : $e->getMessage();
         }
     }
     header('Location: project_financials.php');
@@ -159,6 +146,12 @@ include '../../includes/header.php';
 
 <p style="color:#64748b;margin-top:0;">Full billing and cost control for Accounting. The project in-charge sees the same budget as a read-only Budget View.</p>
 
+<?php if (!empty($_SESSION['success'])): ?>
+    <div class="alert alert-success"><?php echo htmlspecialchars($_SESSION['success']); unset($_SESSION['success']); ?></div>
+<?php endif; ?>
+<?php if (!empty($_SESSION['error'])): ?>
+    <div class="alert alert-danger"><?php echo htmlspecialchars($_SESSION['error']); unset($_SESSION['error']); ?></div>
+<?php endif; ?>
 <?php if (isset($error)): ?>
     <div class="alert alert-danger"><?php echo htmlspecialchars($error); ?></div>
 <?php endif; ?>
@@ -195,7 +188,15 @@ include '../../includes/header.php';
         <div class="detail-row"><span>Project Code:</span> <strong><?php echo htmlspecialchars($project_details['project_code']); ?></strong></div>
         <div class="detail-row"><span>Project Name:</span> <strong><?php echo htmlspecialchars($project_details['name']); ?></strong></div>
         <div class="detail-row"><span>Client:</span> <?php echo htmlspecialchars($project_details['client'] ?? 'N/A'); ?></div>
-        <div class="detail-row"><span>Status:</span> <span class="badge badge-<?php echo $project_details['status']; ?>"><?php echo ucfirst($project_details['status']); ?></span></div>
+        <div class="detail-row"><span>Status:</span> <?php
+            $detailDecision = 'pending';
+            if (($project_details['accounting_status'] ?? '') === 'rejected') {
+                $detailDecision = 'rejected';
+            } elseif (in_array($project_details['accounting_status'] ?? '', ['received', 'quoted'], true)) {
+                $detailDecision = 'approved';
+            }
+            echo '<span class="badge badge-' . ($detailDecision === 'approved' ? 'approved' : ($detailDecision === 'rejected' ? 'rejected' : 'pending')) . '">' . ucfirst($detailDecision) . '</span>';
+        ?></div>
         <div class="detail-row"><span>Start Date:</span> <?php echo $project_details['start_date'] ? date('M d, Y', strtotime($project_details['start_date'])) : 'N/A'; ?></div>
         <div class="detail-row"><span>End Date:</span> <?php echo $project_details['end_date'] ? date('M d, Y', strtotime($project_details['end_date'])) : 'N/A'; ?></div>
         <div class="detail-row"><span>Estimated Budget:</span> <strong>₱<?php echo number_format($project_details['estimated_budget'], 2); ?></strong></div>
@@ -378,10 +379,9 @@ include '../../includes/header.php';
             <input type="text" id="searchProject" placeholder="Search projects..." style="padding:0.4rem 0.8rem; border:1px solid var(--border-color); border-radius:6px; font-size:0.85rem;">
             <select id="filterStatus" style="padding:0.4rem 0.8rem; border:1px solid var(--border-color); border-radius:6px; font-size:0.85rem;">
                 <option value="">All Status</option>
-                <option value="planning">Planning</option>
-                <option value="ongoing">Ongoing</option>
-                <option value="completed">Completed</option>
-                <option value="on_hold">On Hold</option>
+                <option value="pending">Pending</option>
+                <option value="approved">Approved</option>
+                <option value="rejected">Rejected</option>
             </select>
         </div>
     </div>
@@ -412,7 +412,15 @@ include '../../includes/header.php';
                     </tr>
                 <?php else: ?>
                     <?php foreach ($project_records as $project): ?>
-                    <tr data-status="<?php echo htmlspecialchars($project['status']); ?>"<?php echo ((float) $project['actual_cost'] > (float) $project['estimated_budget']) ? ' style="background:#fee2e2;"' : ''; ?>>
+                    <?php
+                        $decision = 'pending';
+                        if (($project['accounting_status'] ?? '') === 'rejected') {
+                            $decision = 'rejected';
+                        } elseif (in_array($project['accounting_status'] ?? '', ['received', 'quoted'], true)) {
+                            $decision = 'approved';
+                        }
+                    ?>
+                    <tr data-status="<?php echo $decision; ?>"<?php echo ((float) $project['actual_cost'] > (float) $project['estimated_budget']) ? ' style="background:#fee2e2;"' : ''; ?>>
                         <td><strong><?php echo htmlspecialchars($project['project_code']); ?></strong></td>
                         <td><?php echo htmlspecialchars($project['name']); ?></td>
                         <td>₱<?php echo number_format($project['estimated_budget'], 2); ?></td>
@@ -422,17 +430,22 @@ include '../../includes/header.php';
                         <td>₱<?php echo number_format($project['total_invoices'], 2); ?> (<?php echo $project['invoice_count']; ?>)</td>
                         <td>₱<?php echo number_format($project['total_expenses'], 2); ?> (<?php echo $project['expense_count']; ?>)</td>
                         <td>₱<?php echo number_format($project['purchase_costs'], 2); ?> (<?php echo $project['purchase_request_count']; ?>)</td>
-                        <td><span class="badge badge-<?php echo $project['status']; ?>"><?php echo ucfirst($project['status']); ?></span></td>
+                        <td>
+                            <?php if (canWriteDepartmentData('accounting')): ?>
+                                <form method="POST" style="display:flex;gap:0.25rem;flex-wrap:wrap;">
+                                    <input type="hidden" name="set_accounting_decision" value="1">
+                                    <input type="hidden" name="project_id" value="<?php echo (int) $project['id']; ?>">
+                                    <button type="submit" name="decision" value="pending" class="btn btn-sm <?php echo $decision === 'pending' ? 'btn-warning' : 'btn-outline'; ?>">Pending</button>
+                                    <button type="submit" name="decision" value="approved" class="btn btn-sm <?php echo $decision === 'approved' ? 'btn-success' : 'btn-outline'; ?>">Approved</button>
+                                    <button type="submit" name="decision" value="rejected" class="btn btn-sm <?php echo $decision === 'rejected' ? 'btn-danger' : 'btn-outline'; ?>" onclick="return confirm('Reject this project?');">Rejected</button>
+                                </form>
+                            <?php else: ?>
+                                <?php echo accountingDecisionView($decision); ?>
+                            <?php endif; ?>
+                        </td>
                         <td>
                             <a href="?action=view&id=<?php echo $project['id']; ?>" class="btn btn-sm btn-info" title="View">View</a>
                             <a href="?action=view&id=<?php echo (int) $project['id']; ?>" class="btn btn-sm btn-outline" title="Details">Details</a>
-                            <?php if (canWriteDepartmentData('accounting') && ($project['accounting_status'] ?? 'pending') === 'pending'): ?>
-                            <form method="POST" style="display:inline;">
-                                <input type="hidden" name="project_id" value="<?php echo (int) $project['id']; ?>">
-                                <button type="submit" name="receive_project" class="btn btn-sm btn-success">Receive</button>
-                                <button type="submit" name="reject_project" class="btn btn-sm btn-danger" onclick="return confirm('Reject this project?')">Reject</button>
-                            </form>
-                            <?php endif; ?>
                         </td>
                     </tr>
                     <?php endforeach; ?>

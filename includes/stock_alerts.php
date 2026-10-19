@@ -40,19 +40,22 @@ if (!function_exists('getLowStockMaterials')) {
             return;
         }
 
-        $items = getLowStockMaterials(5);
+        $items = getLowStockMaterials(3);
         $parts = [];
         foreach ($items as $item) {
-            $label = htmlspecialchars($item['name'])
+            $full = $item['name'];
+            $short = function_exists('mb_strlen') && mb_strlen($full) > 28 ? mb_substr($full, 0, 28) . '...' : (strlen($full) > 28 ? substr($full, 0, 28) . '...' : $full);
+            $label = htmlspecialchars($short)
                 . ' (' . (int) $item['current_stock']
                 . ' / min ' . (int) $item['min_stock']
                 . ')';
             $href = ($link_base ?: (defined('APP_URL') ? APP_URL . 'modules/warehouse/inventory.php' : 'inventory.php'))
                 . '?highlight=' . (int) $item['id'];
-            $parts[] = '<a href="' . htmlspecialchars($href) . '">' . $label . '</a>';
+            $parts[] = '<a href="' . htmlspecialchars($href) . '" title="' . htmlspecialchars($full) . '">' . $label . '</a>';
         }
 
-        $more = $total > 5 ? ' and ' . ($total - 5) . ' more' : '';
+        $listHref = $link_base ?: (defined('APP_URL') ? APP_URL . 'modules/warehouse/inventory.php' : 'inventory.php');
+        $more = $total > 3 ? ' <a href="' . htmlspecialchars($listHref) . '">+' . ($total - 3) . ' more</a>' : '';
         echo '<div class="alert alert-warning low-stock-banner">'
             . '<i class="fas fa-exclamation-triangle"></i> '
             . '<strong>' . (int) $total . ' material' . ($total === 1 ? '' : 's') . '</strong> '
