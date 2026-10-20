@@ -51,6 +51,33 @@ if (isset($_GET['remove_personnel'])) {
     exit();
 }
 
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['set_project_stage'])) {
+    $back = (($_POST['view'] ?? '') === 'implementation') ? 'project_details.php?view=implementation' : 'project_details.php';
+    if (!canWriteDepartmentData('projects')) {
+        $_SESSION['error'] = 'Administrators have view-only access.';
+        header('Location: ' . $back);
+        exit();
+    }
+    $pid = (int) ($_POST['project_id'] ?? 0);
+    $stage = $_POST['progress_status'] ?? '';
+    $allowed = ['planning', 'ongoing', 'on_hold', 'completed'];
+    $completionBlock = $stage === 'completed' ? projectCompletionBlocker($pdo, $pid) : null;
+    if ($pid <= 0 || !in_array($stage, $allowed, true)) {
+        $_SESSION['error'] = 'Choose Planning, Ongoing, On Hold, or Completed.';
+    } elseif ($completionBlock) {
+        $_SESSION['error'] = $completionBlock;
+    } else {
+        try {
+            $pdo->prepare("UPDATE projects SET status = ? WHERE id = ?")->execute([$stage, $pid]);
+            $_SESSION['success'] = 'Project status updated.';
+        } catch (PDOException $e) {
+            $_SESSION['error'] = userDatabaseError($e, 'Projects');
+        }
+    }
+    header('Location: ' . $back);
+    exit();
+}
+
 $project = null;
 $purchase_requests = [];
 $invoices = [];
@@ -73,7 +100,12 @@ try {
         }
     }
     if ($id <= 0) {
-        $all_projects = $pdo->query("SELECT id, project_code, name, location, status, estimated_budget, start_date, end_date FROM projects ORDER BY created_at DESC")->fetchAll();
+        $all_projects = $pdo->query("
+            SELECT p.id, p.project_code, p.name, p.location, p.status, p.estimated_budget, p.start_date, p.end_date,
+                   (SELECT a.completion_percentage FROM accomplishments a WHERE a.project_id = p.id ORDER BY a.id DESC LIMIT 1) AS progress_percent
+            FROM projects p
+            ORDER BY p.created_at DESC
+        ")->fetchAll();
     } else {
         $stmt = $pdo->prepare("SELECT p.*, vpc.actual_cost, vpc.pending_cost, vpc.budget_variance, vpc.expense_total, vpc.purchase_total FROM projects p LEFT JOIN v_project_costs vpc ON vpc.project_id = p.id WHERE p.id = ?");
         $stmt->execute([$id]);
@@ -209,7 +241,33 @@ include '../../includes/header.php';
                         <td><strong><?php echo htmlspecialchars($row['project_code']); ?></strong></td>
                         <td><?php echo htmlspecialchars($row['name']); ?></td>
                         <td><?php echo htmlspecialchars($row['location'] ?? 'N/A'); ?></td>
-                        <td><span class="badge badge-<?php echo htmlspecialchars($row['status']); ?>"><?php echo ucfirst(str_replace('_', ' ', $row['status'])); ?></span></td>
+                        <td>
+                            <?php
+                            $stage = in_array($row['status'], ['completed', 'on_hold', 'ongoing', 'planning'], true) ? $row['status'] : 'planning';
+                            $stagePercent = $row['progress_percent'];
+                            if ($stage === 'completed') {
+                                $stagePercent = 100;
+                            } elseif ($stage === 'planning' || $stagePercent === null) {
+                                $stagePercent = 0;
+                            }
+                            ?>
+                            <?php if (canWriteDepartmentData('projects')): ?>
+                            <form method="POST" style="margin:0;">
+                                <input type="hidden" name="set_project_stage" value="1">
+                                <input type="hidden" name="project_id" value="<?php echo (int) $row['id']; ?>">
+                                <?php if ($view === 'implementation'): ?><input type="hidden" name="view" value="implementation"><?php endif; ?>
+                                <select name="progress_status" onchange="this.form.submit()" style="min-width:8.5rem;">
+                                    <option value="planning" <?php echo $stage === 'planning' ? 'selected' : ''; ?>>Planning</option>
+                                    <option value="ongoing" <?php echo $stage === 'ongoing' ? 'selected' : ''; ?>>Ongoing</option>
+                                    <option value="on_hold" <?php echo $stage === 'on_hold' ? 'selected' : ''; ?>>On Hold</option>
+                                    <option value="completed" <?php echo $stage === 'completed' ? 'selected' : ''; ?>>Completed</option>
+                                </select>
+                            </form>
+                            <?php else: ?>
+                            <span class="badge badge-<?php echo htmlspecialchars($stage); ?>"><?php echo ['planning' => 'Planning', 'ongoing' => 'Ongoing', 'on_hold' => 'On Hold', 'completed' => 'Completed'][$stage]; ?></span>
+                            <?php endif; ?>
+                            <div style="color:#64748b;font-size:0.8rem;"><?php echo number_format((float) $stagePercent, 1); ?>%</div>
+                        </td>
                         <td>₱<?php echo number_format((float)$row['estimated_budget'], 2); ?></td>
                         <td>
                             <a href="project_details.php?id=<?php echo (int)$row['id']; ?><?php echo $view === 'implementation' ? '&view=implementation' : ''; ?>" class="btn btn-sm btn-info"><i class="fas fa-hard-hat"></i> <?php echo $view === 'implementation' ? 'Open' : 'View'; ?></a>
@@ -250,7 +308,11 @@ include '../../includes/header.php';
         </div>
         <div class="detail-item">
             <div class="label">Status</div>
-            <div class="value"><span class="badge badge-<?php echo $project['status']; ?>"><?php echo ucfirst($project['status']); ?></span></div>
+            <?php
+            $stage = in_array($project['status'], ['completed', 'on_hold', 'ongoing', 'planning'], true) ? $project['status'] : 'planning';
+            $stageLabel = ['planning' => 'Planning', 'ongoing' => 'Ongoing', 'on_hold' => 'On Hold', 'completed' => 'Completed'][$stage];
+            ?>
+            <div class="value"><span class="badge badge-<?php echo htmlspecialchars($stage); ?>"><?php echo $stageLabel; ?></span></div>
         </div>
         <div class="detail-item">
             <div class="label">Client</div>

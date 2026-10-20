@@ -35,6 +35,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['add_project']) || is
     if ($start_date !== null && $end_date !== null && $end_date < $start_date) {
         $errors[] = 'End date must be on or after the start date.';
     }
+    if ($status === 'completed') {
+        $alreadyCompleted = false;
+        if (isset($_POST['update_project']) && $id > 0) {
+            $previousStatus = $pdo->prepare("SELECT status FROM projects WHERE id = ?");
+            $previousStatus->execute([$id]);
+            $alreadyCompleted = $previousStatus->fetchColumn() === 'completed';
+        }
+        if (!$alreadyCompleted) {
+            $errors[] = isset($_POST['add_project'])
+                ? 'This project cannot be completed yet. Accounting has not approved it.'
+                : (projectCompletionBlocker($pdo, $id) ?? '');
+            $errors = array_values(array_filter($errors, static function ($message) {
+                return $message !== '';
+            }));
+        }
+    }
 
     if (empty($errors)) {
         try {

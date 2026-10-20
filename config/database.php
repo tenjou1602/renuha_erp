@@ -16,11 +16,105 @@ define('TIMEZONE', 'Asia/Manila');
 // Set timezone
 date_default_timezone_set(TIMEZONE);
 
+function runehaProjectCostsSelectSql(): string
+{
+    return "SELECT
+  p.id AS project_id,
+  p.project_code AS project_code,
+  p.name AS name,
+  p.estimated_budget AS estimated_budget,
+  p.status AS status,
+  COALESCE(paid.paid_total, 0) AS expense_total,
+  COALESCE(pend.pending_total, 0) AS pending_cost,
+  COALESCE(po.purchase_total, 0) AS purchase_total,
+  COALESCE(paid.paid_total, 0) + COALESCE(po.purchase_total, 0) AS actual_cost,
+  p.estimated_budget - (COALESCE(paid.paid_total, 0) + COALESCE(po.purchase_total, 0)) AS budget_variance
+FROM projects p
+LEFT JOIN (
+  SELECT project_id, SUM(amount) AS paid_total
+  FROM expenses
+  WHERE status = 'paid'
+  GROUP BY project_id
+) paid ON paid.project_id = p.id
+LEFT JOIN (
+  SELECT project_id, SUM(amount) AS pending_total
+  FROM expenses
+  WHERE status = 'pending'
+  GROUP BY project_id
+) pend ON pend.project_id = p.id
+LEFT JOIN (
+  SELECT po.project_id, SUM(po.total_amount) AS purchase_total
+  FROM purchase_orders po
+  WHERE po.project_id IS NOT NULL
+    AND po.status IN ('confirmed', 'ready_for_warehouse', 'delivered')
+    AND NOT EXISTS (
+      SELECT 1 FROM expenses e WHERE e.purchase_order_id = po.id
+    )
+  GROUP BY po.project_id
+) po ON po.project_id = p.id";
+}
+
+function runehaRewriteProjectCostsSql(string $sql): string
+{
+    $derived = '(' . runehaProjectCostsSelectSql() . ')';
+    $keywords = 'WHERE|LEFT|RIGHT|INNER|CROSS|JOIN|ON|GROUP|ORDER|LIMIT|UNION|HAVING|SET|AND|OR|ASC|DESC';
+    $rewritten = preg_replace_callback(
+        '/\bv_project_costs\b(?:\s+(?:AS\s+)?(?!(?:' . $keywords . ')\b)([A-Za-z_][A-Za-z0-9_]*))?/i',
+        static function (array $match) use ($derived): string {
+            return $derived . ' ' . ($match[1] ?? 'v_project_costs');
+        },
+        $sql
+    );
+    return $rewritten ?? $sql;
+}
+
+class RunehaPdo extends PDO
+{
+    private bool $rewriteProjectCosts = false;
+
+    public function enableProjectCostRewrite(bool $enabled): void
+    {
+        $this->rewriteProjectCosts = $enabled;
+    }
+
+    #[\ReturnTypeWillChange]
+    public function prepare(string $query, array $options = [])
+    {
+        if ($this->rewriteProjectCosts) {
+            $query = runehaRewriteProjectCostsSql($query);
+        }
+        return parent::prepare($query, $options);
+    }
+
+    #[\ReturnTypeWillChange]
+    public function query(string $query, ?int $fetchMode = null, mixed ...$fetchModeArgs)
+    {
+        if ($this->rewriteProjectCosts) {
+            $query = runehaRewriteProjectCostsSql($query);
+        }
+        if ($fetchMode === null) {
+            return parent::query($query);
+        }
+        return parent::query($query, $fetchMode, ...$fetchModeArgs);
+    }
+
+    #[\ReturnTypeWillChange]
+    public function exec(string $statement)
+    {
+        if ($this->rewriteProjectCosts) {
+            $statement = runehaRewriteProjectCostsSql($statement);
+        }
+        return parent::exec($statement);
+    }
+}
+
 try {
-    $pdo = new PDO("mysql:host=" . DB_HOST . ";port=" . DB_PORT . ";dbname=" . DB_NAME . ";charset=utf8mb4", DB_USER, DB_PASS);
+    $pdo = new RunehaPdo("mysql:host=" . DB_HOST . ";port=" . DB_PORT . ";dbname=" . DB_NAME . ";charset=utf8mb4", DB_USER, DB_PASS);
     $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
     $pdo->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
     $pdo->setAttribute(PDO::ATTR_EMULATE_PREPARES, false);
+    $costView = $pdo->query("SHOW FULL TABLES LIKE 'v_project_costs'", PDO::FETCH_NUM)->fetch();
+    $pdo->enableProjectCostRewrite(!($costView && strcasecmp((string) ($costView[1] ?? ''), 'VIEW') === 0));
 } catch(PDOException $e) {
     die("Database Connection Failed: " . $e->getMessage());
 }
@@ -415,6 +509,56 @@ function budgetPosition(float $budget, float $actual, float $pending = 0): array
         'label' => $variance < 0 ? 'Over budget' : 'Under budget',
         'over' => $variance < 0,
     ];
+}
+
+function projectCompletionBlocker(PDO $pdo, int $projectId): ?string
+{
+    $projectStmt = $pdo->prepare("SELECT accounting_status, engineering_received_at FROM projects WHERE id = ?");
+    $projectStmt->execute([$projectId]);
+    $project = $projectStmt->fetch();
+    if (!$project) {
+        return 'This project could not be found.';
+    }
+    if (!in_array($project['accounting_status'], ['received', 'quoted'], true)) {
+        return 'This project cannot be completed yet. Accounting has not approved it.';
+    }
+    if (empty($project['engineering_received_at'])) {
+        return 'This project cannot be completed yet. Engineering has not received it.';
+    }
+    $requestStmt = $pdo->prepare("SELECT COUNT(*) FROM purchase_requests WHERE project_id = ?");
+    $requestStmt->execute([$projectId]);
+    if ((int) $requestStmt->fetchColumn() < 1) {
+        return 'This project cannot be completed yet. Engineering has not sent a material request to Procurement.';
+    }
+    $orderStmt = $pdo->prepare("
+        SELECT po.id, po.status, po.received_at,
+               (SELECT e.status FROM expenses e WHERE e.purchase_order_id = po.id ORDER BY e.id DESC LIMIT 1) AS expense_status
+        FROM purchase_orders po
+        LEFT JOIN purchase_requests pr ON pr.id = po.purchase_request_id
+        WHERE COALESCE(po.project_id, pr.project_id) = ?
+          AND po.status NOT IN ('draft', 'cancelled')
+    ");
+    $orderStmt->execute([$projectId]);
+    $orders = $orderStmt->fetchAll();
+    if (!$orders) {
+        return 'This project cannot be completed yet. Procurement has not created a purchase order.';
+    }
+    foreach ($orders as $order) {
+        if (($order['expense_status'] ?? '') !== 'paid') {
+            return 'This project cannot be completed yet. Accounting has not marked the materials as paid.';
+        }
+    }
+    foreach ($orders as $order) {
+        if ($order['status'] !== 'delivered' || empty($order['received_at'])) {
+            return 'This project cannot be completed yet. Warehouse has not received the materials.';
+        }
+    }
+    $releaseStmt = $pdo->prepare("SELECT COUNT(*) FROM material_requests WHERE project_id = ? AND flow_status IN ('released', 'complete')");
+    $releaseStmt->execute([$projectId]);
+    if ((int) $releaseStmt->fetchColumn() < 1) {
+        return 'This project cannot be completed yet. Warehouse has not released the materials to Engineering.';
+    }
+    return null;
 }
 
 function accountingDecisionLabel(?string $status): string

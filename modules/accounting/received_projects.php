@@ -26,7 +26,7 @@ try {
         SELECT id, project_code, name, client, location, subject, estimated_budget, status, quotation_path, quotation_name, accounting_received_at, accounting_status, created_by, created_at
         FROM projects
         WHERE accounting_status IN ('pending', 'received', 'quoted', 'rejected')
-        ORDER BY FIELD(accounting_status, 'received', 'quoted', 'rejected', 'pending', 'draft', 'revision'), COALESCE(accounting_received_at, created_at) DESC
+        ORDER BY created_at DESC
     ")->fetchAll();
 } catch (PDOException $e) {
     $error = userDatabaseError($e, 'Accounting');

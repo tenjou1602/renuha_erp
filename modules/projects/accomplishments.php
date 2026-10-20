@@ -14,20 +14,42 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_accomplishment'])
     }
     $project_id = (int)($_POST['project_id'] ?? 0);
     $description = trim($_POST['description'] ?? '');
-    $pct = (float)($_POST['completion_percentage'] ?? 0);
+    $stage = $_POST['progress_status'] ?? '';
+    $allowedStages = ['planning', 'ongoing', 'on_hold', 'completed'];
+    if ($stage === 'planning') {
+        $pct = 0.0;
+    } elseif ($stage === 'completed') {
+        $pct = 100.0;
+    } elseif ($stage === 'on_hold') {
+        $latest = $pdo->prepare("SELECT completion_percentage FROM accomplishments WHERE project_id = ? ORDER BY id DESC LIMIT 1");
+        $latest->execute([$project_id]);
+        $pct = (float) $latest->fetchColumn();
+    } else {
+        $pct = (float)($_POST['completion_percentage'] ?? 0);
+    }
     if ($project_id <= 0 || $description === '') {
         $_SESSION['error'] = 'Project and description are required.';
+    } elseif (!in_array($stage, $allowedStages, true)) {
+        $_SESSION['error'] = 'Choose Planning, Ongoing, On Hold, or Completed.';
     } elseif ($pct < 0 || $pct > 100) {
         $_SESSION['error'] = 'Completion must be between 0 and 100.';
+    } elseif ($stage === 'completed' && ($completionBlock = projectCompletionBlocker($pdo, $project_id))) {
+        $_SESSION['error'] = $completionBlock;
     } else {
         try {
-            $stmt = $pdo->prepare("INSERT INTO accomplishments (project_id, description, completion_percentage, created_by) VALUES (?, ?, ?, ?)");
-            $stmt->execute([$project_id, $description, $pct, $_SESSION['user_id']]);
+            $pdo->beginTransaction();
+            $stmt = $pdo->prepare("INSERT INTO accomplishments (project_id, description, completion_percentage, status, created_by) VALUES (?, ?, ?, ?, ?)");
+            $stmt->execute([$project_id, $description, $pct, $stage, $_SESSION['user_id']]);
+            $pdo->prepare("UPDATE projects SET status = ? WHERE id = ?")->execute([$stage, $project_id]);
+            $pdo->commit();
             logActivity($_SESSION['user_id'], 'Added accomplishment', 'Projects', "Project ID: $project_id");
-            $_SESSION['success'] = 'Accomplishment recorded.';
+            $_SESSION['success'] = 'Accomplishment recorded. Project status is now ' . str_replace('_', ' ', $stage) . ' at ' . number_format($pct, 1) . '%.';
             header('Location: accomplishments.php');
             exit();
         } catch (PDOException $e) {
+            if ($pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
             $error = userDatabaseError($e, 'Projects');
         }
     }
@@ -54,7 +76,12 @@ if (isset($_GET['delete_id'])) {
 $projects = [];
 $records = [];
 try {
-    $projects = $pdo->query("SELECT id, project_code, name, status FROM projects ORDER BY created_at DESC")->fetchAll();
+    $projects = $pdo->query("
+        SELECT p.id, p.project_code, p.name, p.status,
+               (SELECT a.completion_percentage FROM accomplishments a WHERE a.project_id = p.id ORDER BY a.id DESC LIMIT 1) AS progress_percent
+        FROM projects p
+        ORDER BY p.created_at DESC
+    ")->fetchAll();
     $records = $pdo->query("
         SELECT a.*, p.project_code, p.name AS project_name, u.full_name AS created_by_name
         FROM accomplishments a
@@ -92,8 +119,17 @@ include '../../includes/header.php';
             <select name="project_id" required>
                 <option value="">Select project</option>
                 <?php foreach ($projects as $project): ?>
-                    <option value="<?php echo (int) $project['id']; ?>"><?php echo htmlspecialchars($project['project_code'] . ' - ' . $project['name']); ?></option>
+                    <option value="<?php echo (int) $project['id']; ?>" data-progress="<?php echo $project['progress_percent'] === null ? '' : htmlspecialchars((string) $project['progress_percent']); ?>"><?php echo htmlspecialchars($project['project_code'] . ' - ' . $project['name']); ?></option>
                 <?php endforeach; ?>
+            </select>
+        </div>
+        <div class="form-group">
+            <label>Status</label>
+            <select name="progress_status" id="progressStatus" required>
+                <option value="planning">Planning</option>
+                <option value="ongoing">Ongoing</option>
+                <option value="on_hold">On Hold</option>
+                <option value="completed">Completed</option>
             </select>
         </div>
         <div class="form-group">
@@ -102,7 +138,8 @@ include '../../includes/header.php';
         </div>
         <div class="form-group">
             <label>Completion %</label>
-            <input type="number" name="completion_percentage" min="0" max="100" step="0.1" value="0" required>
+            <input type="number" name="completion_percentage" id="completionPercent" min="0" max="100" step="0.1" value="0" required>
+            <small style="color:#64748b;">Planning is 0%. Completed is 100%. On Hold keeps the current percent. Ongoing uses the percent you enter.</small>
         </div>
         <button type="submit" name="add_accomplishment" class="btn btn-primary">Save</button>
     </form>
@@ -118,6 +155,7 @@ include '../../includes/header.php';
                     <th>Date</th>
                     <th>Project</th>
                     <th>Description</th>
+                    <th>Status</th>
                     <th>Completion</th>
                     <th>Recorded by</th>
                     <th></th>
@@ -125,13 +163,24 @@ include '../../includes/header.php';
             </thead>
             <tbody>
                 <?php if (empty($records)): ?>
-                    <tr><td colspan="6" class="table-empty">No accomplishments yet.</td></tr>
+                    <tr><td colspan="7" class="table-empty">No accomplishments yet.</td></tr>
                 <?php else: ?>
                     <?php foreach ($records as $row): ?>
                     <tr>
                         <td><?php echo date('M d, Y', strtotime($row['created_at'])); ?></td>
                         <td><strong><?php echo htmlspecialchars(displayDocumentCode($row['project_code'] ?? 'N/A')); ?></strong><br><?php echo htmlspecialchars($row['project_name'] ?? ''); ?></td>
                         <td><?php echo nl2br(htmlspecialchars($row['description'])); ?></td>
+                        <td>
+                            <?php
+                            $rowStage = $row['status'] ?? '';
+                            if (!in_array($rowStage, ['planning', 'ongoing', 'on_hold', 'completed'], true)) {
+                                $rowPct = (float) $row['completion_percentage'];
+                                $rowStage = $rowPct >= 100 ? 'completed' : ($rowPct <= 0 ? 'planning' : 'ongoing');
+                            }
+                            $rowLabel = ['planning' => 'Planning', 'ongoing' => 'Ongoing', 'on_hold' => 'On Hold', 'completed' => 'Completed'][$rowStage];
+                            ?>
+                            <span class="badge badge-<?php echo htmlspecialchars($rowStage); ?>"><?php echo $rowLabel; ?></span>
+                        </td>
                         <td><?php echo number_format((float)$row['completion_percentage'], 1); ?>%</td>
                         <td><?php echo htmlspecialchars($row['created_by_name'] ?? 'N/A'); ?></td>
                         <td>
@@ -148,4 +197,38 @@ include '../../includes/header.php';
     </div>
 </div>
 
+<script>
+(function () {
+    const status = document.getElementById('progressStatus');
+    const percent = document.getElementById('completionPercent');
+    const project = document.querySelector('select[name="project_id"]');
+    if (!status || !percent || !project) return;
+    function currentProgress() {
+        const option = project.selectedOptions[0];
+        const value = option ? option.dataset.progress : '';
+        return value === undefined || value === '' ? '0' : value;
+    }
+    function applyStatus() {
+        if (status.value === 'planning') {
+            percent.value = '0';
+            percent.readOnly = true;
+        } else if (status.value === 'completed') {
+            percent.value = '100';
+            percent.readOnly = true;
+        } else if (status.value === 'on_hold') {
+            percent.value = currentProgress();
+            percent.readOnly = true;
+        } else {
+            percent.readOnly = false;
+            if (percent.value === '0' || percent.value === '100') {
+                const current = currentProgress();
+                percent.value = current === '0' ? '' : current;
+            }
+        }
+    }
+    status.addEventListener('change', applyStatus);
+    project.addEventListener('change', applyStatus);
+    applyStatus();
+})();
+</script>
 <?php include '../../includes/footer.php'; ?>

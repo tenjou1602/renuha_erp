@@ -604,7 +604,8 @@ a {
     background: #d1fae5;
     color: #065f46;
 }
-.badge-on-hold {
+.badge-on-hold,
+.badge-on_hold {
     background: #fee2e2;
     color: #991b1b;
 }

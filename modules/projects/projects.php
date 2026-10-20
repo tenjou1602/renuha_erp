@@ -96,6 +96,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($start_date !== null && $end_date !== null && $end_date < $start_date) {
             $errors[] = 'End date must be on or after the start date.';
         }
+        if ($status === 'completed') {
+            $alreadyCompleted = false;
+            if (isset($_POST['update_project']) && $id > 0) {
+                $previousStatus = $pdo->prepare("SELECT status FROM projects WHERE id = ?");
+                $previousStatus->execute([$id]);
+                $alreadyCompleted = $previousStatus->fetchColumn() === 'completed';
+            }
+            if (!$alreadyCompleted) {
+                $completionBlock = isset($_POST['add_project'])
+                    ? 'This project cannot be completed yet. Accounting has not approved it.'
+                    : projectCompletionBlocker($pdo, $id);
+                if ($completionBlock) {
+                    $errors[] = $completionBlock;
+                }
+            }
+        }
         $quotation_hash = null;
         if ($hasQuotationFile && is_uploaded_file($uploaded['tmp_name'] ?? '')) {
             $quotation_hash = hash_file('sha256', $uploaded['tmp_name']);
