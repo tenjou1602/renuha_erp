@@ -162,6 +162,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     throw new RuntimeException('Invalid username or password.');
                 }
 
+                if (runehaDevLoginEnabled()) {
+                    completeLoginSession($user, 'local development switch');
+                }
+
                 issueLoginOtp($user);
                 $otp_step = true;
                 $masked_email = $_SESSION['login_otp_email_masked'] ?? '';

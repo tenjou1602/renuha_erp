@@ -14,8 +14,9 @@ try {
     } catch (Throwable $e) {
         error_log('[Runeha ERP] purchase expense sync: ' . $e->getMessage());
     }
+    syncProjectBudgetFunds($pdo);
     $stats['total_project_amount'] = $pdo->query("SELECT COALESCE(SUM(estimated_budget), 0) FROM projects")->fetchColumn() ?? 0;
-    $stats['total_project_expenses'] = $pdo->query("SELECT COALESCE(SUM(actual_cost), 0) FROM v_project_costs")->fetchColumn() ?? 0;
+    $stats['total_project_expenses'] = reportedActualCost((float) ($pdo->query("SELECT COALESCE(SUM(actual_cost), 0) FROM v_project_costs")->fetchColumn() ?? 0));
     $stats['pending_cost'] = $pdo->query("SELECT COALESCE(SUM(pending_cost), 0) FROM v_project_costs")->fetchColumn() ?? 0;
     $stats['total_invoices'] = $pdo->query("SELECT COUNT(*) FROM invoices")->fetchColumn() ?? 0;
     $stats['total_expenses'] = $stats['total_project_expenses'];
@@ -34,7 +35,7 @@ try {
         $stats['contracts'] = 0;
     }
     
-    $stats['purchase_costs'] = $pdo->query("SELECT COALESCE(SUM(purchase_total), 0) FROM v_project_costs")->fetchColumn() ?? 0;
+    $stats['purchase_costs'] = reportedDepartmentMoney((float) ($pdo->query("SELECT COALESCE(SUM(purchase_total), 0) FROM v_project_costs")->fetchColumn() ?? 0), 'procurement');
     $stats['active_projects'] = $pdo->query("SELECT COUNT(*) FROM projects WHERE status IN ('assigned', 'planning', 'ongoing')")->fetchColumn() ?? 0;
     $stats['pending_expenses'] = $pdo->query("SELECT COUNT(*) FROM expenses WHERE status = 'pending'")->fetchColumn() ?? 0;
     $stats['project_financials'] = $pdo->query("SELECT COUNT(*) FROM projects")->fetchColumn() ?? 0;
@@ -92,7 +93,7 @@ include '../../includes/header.php';
     <div class="dept-kpis acct-kpis">
         <a class="dept-kpi blue" href="project_financials.php"><div class="ico"><i class="fas fa-folder"></i></div><div><div class="num"><?php echo number_format($stats['project_financials'] ?? 0); ?></div><div class="lbl">Project Financial Summary</div></div></a>
         <a class="dept-kpi red" href="project_financials.php"><div class="ico"><i class="fas fa-receipt"></i></div><div><div class="num" title="₱<?php echo number_format((float) ($stats['total_project_amount'] ?? 0), 2); ?>"><?php echo formatCompactMoney($stats['total_project_amount'] ?? 0); ?></div><div class="lbl">Total Budget</div></div></a>
-        <a class="dept-kpi red" href="expenses.php"><div class="ico"><i class="fas fa-coins"></i></div><div><div class="num" title="₱<?php echo number_format((float) ($stats['total_project_expenses'] ?? 0), 2); ?>"><?php echo formatCompactMoney($stats['total_project_expenses'] ?? 0); ?></div><div class="lbl">Recorded Actual Expenses</div></div></a>
+        <a class="dept-kpi red" href="expenses.php"><div class="ico"><i class="fas fa-coins"></i></div><div><div class="num" title="₱<?php echo number_format((float) ($stats['total_project_expenses'] ?? 0), 2); ?>"><?php echo formatCompactMoney($stats['total_project_expenses'] ?? 0); ?></div><div class="lbl">Recorded Actual Expenses<?php echo adjustmentIncludedLabel('accounting'); ?><?php echo adjustmentIncludedLabel('procurement'); ?></div></div></a>
         <a class="dept-kpi orange" href="expenses.php"><div class="ico"><i class="fas fa-hourglass-half"></i></div><div><div class="num" title="₱<?php echo number_format((float) ($stats['pending_cost'] ?? 0), 2); ?>"><?php echo formatCompactMoney($stats['pending_cost'] ?? 0); ?></div><div class="lbl">Pending/Committed</div></div></a>
         <a class="dept-kpi green" href="funds_budget.php"><div class="ico"><i class="fas fa-wallet"></i></div><div><div class="num" title="₱<?php echo number_format((float) ($stats['available_funds'] ?? 0), 2); ?>"><?php echo formatCompactMoney($stats['available_funds'] ?? 0); ?></div><div class="lbl">Available Funds</div></div></a>
         <a class="dept-kpi teal" href="received_projects.php"><div class="ico"><i class="fas fa-building"></i></div><div><div class="num"><?php echo number_format($stats['active_projects'] ?? 0); ?></div><div class="lbl">Active Projects</div></div></a>

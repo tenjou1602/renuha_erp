@@ -33,11 +33,11 @@ try {
             p.description,
             p.estimated_budget,
             vpc.actual_cost,
-            vpc.pending_cost,
             vpc.budget_variance as remaining_budget,
             p.status,
             p.start_date,
             p.end_date,
+            p.completion_date,
             p.client,
             p.accounting_status,
             (SELECT COUNT(*) FROM invoices inv WHERE inv.project_id = p.id) as invoice_count,
@@ -53,6 +53,10 @@ try {
         ORDER BY p.created_at DESC
     ";
     $project_records = $pdo->query($query)->fetchAll();
+    foreach ($project_records as &$record) {
+        $record['actual_cost'] = reportedActualCost((float) ($record['actual_cost'] ?? 0), (int) $record['id']);
+    }
+    unset($record);
 } catch (PDOException $e) {
     $error = userDatabaseError($e);
 }
@@ -69,7 +73,6 @@ if ($action === 'view' && $id > 0) {
             SELECT 
                 p.*,
                 vpc.actual_cost,
-                vpc.pending_cost,
                 vpc.budget_variance as remaining_budget,
                 vpc.purchase_total,
                 (SELECT COUNT(*) FROM invoices inv WHERE inv.project_id = p.id) as invoice_count,
@@ -138,6 +141,7 @@ include '../../includes/header.php';
 
 <div class="page-header">
     <h1><i class="fas fa-project-diagram"></i> <?php echo $page_title; ?></h1>
+    <p>Actual cost uses the shared project cost source<?php echo adjustmentIncludedLabel('accounting'); ?><?php echo adjustmentIncludedLabel('procurement'); ?>.</p>
     <div style="display:flex;gap:0.5rem;flex-wrap:wrap;">
         <a href="financial_reports.php" class="btn btn-info"><i class="fas fa-chart-bar"></i> Financial Reports</a>
         <a href="funds_budget.php" class="btn btn-primary"><i class="fas fa-wallet"></i> Funds & Budget</a>
@@ -170,10 +174,6 @@ include '../../includes/header.php';
         <div style="font-size:0.75rem;color:#64748b;">Total Actual Cost</div>
         <div class="stat-amount">₱<?php echo number_format((float) array_sum(array_column($project_records, 'actual_cost')), 2); ?></div>
     </div>
-    <div class="card" style="border-left-color:#f6c23e;margin:0;">
-        <div style="font-size:0.75rem;color:#64748b;">Pending/Committed</div>
-        <div class="stat-amount">₱<?php echo number_format((float) array_sum(array_column($project_records, 'pending_cost')), 2); ?></div>
-    </div>
     <div class="card" style="border-left-color:#36b9cc;margin:0;">
         <div style="font-size:0.75rem;color:#64748b;">Total Remaining</div>
         <div class="stat-amount">₱<?php echo number_format((float) array_sum(array_column($project_records, 'remaining_budget')), 2); ?></div>
@@ -197,11 +197,11 @@ include '../../includes/header.php';
             }
             echo '<span class="badge badge-' . ($detailDecision === 'approved' ? 'approved' : ($detailDecision === 'rejected' ? 'rejected' : 'pending')) . '">' . ucfirst($detailDecision) . '</span>';
         ?></div>
-        <div class="detail-row"><span>Start Date:</span> <?php echo $project_details['start_date'] ? date('M d, Y', strtotime($project_details['start_date'])) : 'N/A'; ?></div>
-        <div class="detail-row"><span>End Date:</span> <?php echo $project_details['end_date'] ? date('M d, Y', strtotime($project_details['end_date'])) : 'N/A'; ?></div>
+        <div class="detail-row"><span>Start Date:</span> <?php echo formatDisplayDate($project_details['start_date'] ?? null); ?></div>
+        <div class="detail-row"><span>End Date:</span> <?php echo formatDisplayDate($project_details['end_date'] ?? null); ?></div>
+        <div class="detail-row"><span>Completion Date:</span> <?php echo formatDisplayDate($project_details['completion_date'] ?? null); ?></div>
         <div class="detail-row"><span>Estimated Budget:</span> <strong>₱<?php echo number_format($project_details['estimated_budget'], 2); ?></strong></div>
         <div class="detail-row"><span>Actual Cost:</span> <strong>₱<?php echo number_format($project_details['actual_cost'], 2); ?></strong></div>
-        <div class="detail-row"><span>Pending/Committed:</span> <strong>₱<?php echo number_format((float) ($project_details['pending_cost'] ?? 0), 2); ?></strong></div>
         <div class="detail-row"><span>Remaining Budget:</span> <strong class="<?php echo $project_details['remaining_budget'] >= 0 ? 'budget-positive' : 'budget-negative'; ?>">₱<?php echo number_format($project_details['remaining_budget'], 2); ?></strong></div>
         <?php
             $quote_pipeline = 0;
@@ -393,8 +393,7 @@ include '../../includes/header.php';
                     <th onclick="sortTable('projectTable', 1)" style="cursor:pointer;">Name <i class="fas fa-sort"></i></th>
                     <th onclick="sortTable('projectTable', 2)" style="cursor:pointer;">Budget <i class="fas fa-sort"></i></th>
                     <th onclick="sortTable('projectTable', 3)" style="cursor:pointer;">Actual Cost <i class="fas fa-sort"></i></th>
-                    <th onclick="sortTable('projectTable', 4)" style="cursor:pointer;">Pending/Committed <i class="fas fa-sort"></i></th>
-                    <th onclick="sortTable('projectTable', 5)" style="cursor:pointer;">Remaining <i class="fas fa-sort"></i></th>
+                    <th onclick="sortTable('projectTable', 4)" style="cursor:pointer;">Remaining <i class="fas fa-sort"></i></th>
                     <th onclick="sortTable('projectTable', 5)" style="cursor:pointer;">Invoices <i class="fas fa-sort"></i></th>
                     <th onclick="sortTable('projectTable', 6)" style="cursor:pointer;">Expenses <i class="fas fa-sort"></i></th>
                     <th onclick="sortTable('projectTable', 7)" style="cursor:pointer;">Purchase Costs <i class="fas fa-sort"></i></th>
@@ -405,7 +404,7 @@ include '../../includes/header.php';
             <tbody>
                 <?php if (empty($project_records)): ?>
                     <tr>
-                        <td colspan="11" style="text-align:center;color:#94a3b8;padding:2rem;">
+                        <td colspan="10" style="text-align:center;color:#94a3b8;padding:2rem;">
                             <i class="fas fa-project-diagram" style="font-size:2rem;display:block;margin-bottom:0.5rem;opacity:0.3;"></i>
                             No project financial records found.
                         </td>
@@ -425,19 +424,21 @@ include '../../includes/header.php';
                         <td><?php echo htmlspecialchars($project['name']); ?></td>
                         <td>₱<?php echo number_format($project['estimated_budget'], 2); ?></td>
                         <td>₱<?php echo number_format($project['actual_cost'], 2); ?></td>
-                        <td>₱<?php echo number_format((float) ($project['pending_cost'] ?? 0), 2); ?></td>
                         <td class="<?php echo $project['remaining_budget'] >= 0 ? 'budget-positive' : 'budget-negative'; ?>">₱<?php echo number_format($project['remaining_budget'], 2); ?></td>
                         <td>₱<?php echo number_format($project['total_invoices'], 2); ?> (<?php echo $project['invoice_count']; ?>)</td>
                         <td>₱<?php echo number_format($project['total_expenses'], 2); ?> (<?php echo $project['expense_count']; ?>)</td>
                         <td>₱<?php echo number_format($project['purchase_costs'], 2); ?> (<?php echo $project['purchase_request_count']; ?>)</td>
                         <td>
-                            <?php if (canWriteDepartmentData('accounting')): ?>
+                            <?php if ($decision === 'approved' || $decision === 'rejected'): ?>
+                                <?php echo accountingDecisionView($decision); ?>
+                                <small style="display:block;color:#64748b;margin-top:0.35rem;"><?php echo $decision === 'approved' ? 'Approved' : 'Rejected'; ?>. Status is locked.</small>
+                            <?php elseif (canWriteDepartmentData('accounting')): ?>
                                 <form method="POST" style="display:flex;gap:0.25rem;flex-wrap:wrap;">
                                     <input type="hidden" name="set_accounting_decision" value="1">
                                     <input type="hidden" name="project_id" value="<?php echo (int) $project['id']; ?>">
-                                    <button type="submit" name="decision" value="pending" class="btn btn-sm <?php echo $decision === 'pending' ? 'btn-warning' : 'btn-outline'; ?>">Pending</button>
-                                    <button type="submit" name="decision" value="approved" class="btn btn-sm <?php echo $decision === 'approved' ? 'btn-success' : 'btn-outline'; ?>">Approved</button>
-                                    <button type="submit" name="decision" value="rejected" class="btn btn-sm <?php echo $decision === 'rejected' ? 'btn-danger' : 'btn-outline'; ?>" onclick="return confirm('Reject this project?');">Rejected</button>
+                                    <button type="submit" name="decision" value="pending" class="btn btn-sm btn-warning">Pending</button>
+                                    <button type="submit" name="decision" value="approved" class="btn btn-sm btn-outline" onclick="return confirm('Approve this project? The status cannot be changed after this.');">Approved</button>
+                                    <button type="submit" name="decision" value="rejected" class="btn btn-sm btn-outline" onclick="return confirm('Reject this project? The status cannot be changed after this.');">Rejected</button>
                                 </form>
                             <?php else: ?>
                                 <?php echo accountingDecisionView($decision); ?>

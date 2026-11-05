@@ -20,7 +20,7 @@ try {
     // Overall purchase costs summary
     $cost_summary['total_requests'] = $pdo->query("SELECT COUNT(*) FROM purchase_requests WHERE created_at BETWEEN '$start_date' AND '$end_date 23:59:59'")->fetchColumn() ?? 0;
     $cost_summary['total_amount'] = $pdo->query("SELECT COALESCE(SUM(total_amount), 0) FROM purchase_requests WHERE status IN ('approved', 'confirmed', 'ordered', 'received', 'completed') AND created_at BETWEEN '$start_date' AND '$end_date 23:59:59'")->fetchColumn() ?? 0;
-    $cost_summary['paid_amount'] = $pdo->query("SELECT COALESCE(SUM(total_amount), 0) FROM purchase_requests WHERE status IN ('received', 'completed') AND created_at BETWEEN '$start_date' AND '$end_date 23:59:59'")->fetchColumn() ?? 0;
+    $cost_summary['paid_amount'] = $pdo->query("SELECT COALESCE(SUM(amount), 0) FROM expenses WHERE status = 'paid' AND COALESCE(expense_date, created_at) BETWEEN '$start_date' AND '$end_date 23:59:59'")->fetchColumn() ?? 0;
     $cost_summary['pending_amount'] = $cost_summary['total_amount'] - $cost_summary['paid_amount'];
     
     // Purchase costs by project
@@ -31,8 +31,14 @@ try {
             p.name as project_name,
             COUNT(DISTINCT pr.id) as request_count,
             COALESCE(SUM(CASE WHEN pr.status IN ('approved', 'confirmed', 'ordered', 'received', 'completed') THEN pr.total_amount ELSE 0 END), 0) as total_cost,
-            COALESCE(SUM(CASE WHEN pr.status IN ('received', 'completed') THEN pr.total_amount ELSE 0 END), 0) as paid_cost,
-            COALESCE(SUM(CASE WHEN pr.status IN ('approved', 'confirmed', 'ordered') THEN pr.total_amount ELSE 0 END), 0) as pending_cost
+            COALESCE((
+                SELECT SUM(e.amount)
+                FROM expenses e
+                WHERE e.project_id = p.id
+                  AND e.status = 'paid'
+                  AND COALESCE(e.expense_date, e.created_at) BETWEEN '$start_date' AND '$end_date 23:59:59'
+            ), 0) as paid_cost,
+            GROUP_CONCAT(DISTINCT pr.status ORDER BY pr.id SEPARATOR ',') AS request_statuses
         FROM projects p
         LEFT JOIN purchase_requests pr ON p.id = pr.project_id AND pr.created_at BETWEEN '$start_date' AND '$end_date 23:59:59'
         GROUP BY p.id, p.project_code, p.name
@@ -283,7 +289,7 @@ include '../../includes/header.php';
                         <th>Requests</th>
                         <th>Total Cost</th>
                         <th>Paid</th>
-                        <th>Pending</th>
+                        <th>Status</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -293,8 +299,36 @@ include '../../includes/header.php';
                         <td><?php echo htmlspecialchars($project['project_name']); ?></td>
                         <td><?php echo $project['request_count']; ?></td>
                         <td>₱<?php echo number_format($project['total_cost'], 2); ?></td>
-                        <td class="cost-paid">₱<?php echo number_format($project['paid_cost'], 2); ?></td>
-                        <td class="cost-pending">₱<?php echo number_format($project['pending_cost'], 2); ?></td>
+                        <?php
+                            $hasPending = false;
+                            $hasApproved = false;
+                            $hasCompleted = false;
+                            foreach (array_filter(explode(',', (string) ($project['request_statuses'] ?? ''))) as $requestStatus) {
+                                if (in_array($requestStatus, ['received', 'completed'], true)) {
+                                    $hasCompleted = true;
+                                } elseif (in_array($requestStatus, ['approved', 'confirmed', 'ordered'], true)) {
+                                    $hasApproved = true;
+                                } else {
+                                    $hasPending = true;
+                                }
+                            }
+                            $shownPaid = (float) $project['paid_cost'];
+                            if ($shownPaid <= 0 && !$hasPending && ($hasApproved || $hasCompleted)) {
+                                $shownPaid = (float) $project['total_cost'];
+                            }
+                        ?>
+                        <td class="cost-paid">₱<?php echo number_format($shownPaid, 2); ?></td>
+                        <td><?php
+                            if ($hasPending) {
+                                echo '<span class="badge badge-pending">Pending</span>';
+                            } elseif ($hasApproved) {
+                                echo '<span class="badge badge-approved">Approved</span>';
+                            } elseif ($hasCompleted) {
+                                echo '<span class="badge badge-completed">Completed</span>';
+                            } else {
+                                echo '—';
+                            }
+                        ?></td>
                     </tr>
                     <?php endforeach; ?>
                 </tbody>

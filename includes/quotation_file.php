@@ -666,6 +666,121 @@ function quotationNumber($value): float
     return is_numeric($clean) ? round((float) $clean, 2) : 0.0;
 }
 
+function projectQuotationMaterials(PDO $pdo, int $projectId): array
+{
+    $stmt = $pdo->prepare("
+        SELECT item_name, description, quantity, unit, unit_price
+        FROM project_quotation_items
+        WHERE project_id = ?
+        UNION
+        SELECT i.item_name, i.description, i.quantity, i.unit, i.unit_price
+        FROM client_quotation_items i
+        INNER JOIN client_quotations q ON q.id = i.quotation_id
+        WHERE q.project_id = ?
+        ORDER BY item_name
+    ");
+    $stmt->execute([$projectId, $projectId]);
+    $catalog = $pdo->query("SELECT id, material_code, name FROM materials WHERE status = 'active'")->fetchAll();
+    $materialByName = [];
+    foreach ($catalog as $catalogItem) {
+        $materialByName[strtolower(trim((string) $catalogItem['name']))] = $catalogItem;
+    }
+    $seen = [];
+    $materials = [];
+    foreach ($stmt->fetchAll() as $row) {
+        $key = strtolower(trim((string) $row['item_name'] . '|' . (string) $row['description']));
+        if (isset($seen[$key]) || preg_match('/\bvat\b/i', (string) $row['item_name'])) {
+            continue;
+        }
+        $seen[$key] = true;
+        $match = $materialByName[strtolower(trim((string) $row['item_name']))] ?? null;
+        $row['material_id'] = (int) ($match['id'] ?? 0);
+        $row['material_code'] = (string) ($match['material_code'] ?? '');
+        $row['unit'] = trim((string) ($row['unit'] ?? '')) ?: 'pcs';
+        $materials[] = $row;
+    }
+    return $materials;
+}
+
+function projectExcelLinesForRequest(array $lines): array
+{
+    if (!$lines) {
+        throw new RuntimeException('This project has no Excel materials.');
+    }
+    $missing = [];
+    $ready = [];
+    foreach ($lines as $line) {
+        $name = trim((string) ($line['item_name'] ?? ''));
+        if ((int) ($line['material_id'] ?? 0) <= 0) {
+            $missing[] = $name !== '' ? $name : 'Unnamed material';
+            continue;
+        }
+        $qty = (float) ($line['quantity'] ?? 0);
+        if ($qty <= 0 || abs($qty - round($qty)) > 0.001) {
+            throw new RuntimeException('The Excel quantity for "' . $name . '" must be used as it is. It cannot be changed.');
+        }
+        $ready[] = [
+            'material_id' => (int) $line['material_id'],
+            'name' => $name,
+            'qty' => (int) round($qty),
+            'unit' => trim((string) ($line['unit'] ?? '')) ?: 'pcs',
+            'cost' => round((float) ($line['unit_price'] ?? 0), 2),
+        ];
+    }
+    if (!$ready) {
+        throw new RuntimeException('These Excel materials are not in inventory yet. Warehouse must add them before the request can be sent: ' . implode(', ', $missing));
+    }
+    return ['lines' => $ready, 'missing' => $missing];
+}
+
+function saveProjectExcelRequestItems(PDO $pdo, int $requestId, array $ready): float
+{
+    $itemStmt = $pdo->prepare("INSERT INTO purchase_request_items (purchase_request_id, material_id, quantity, unit, estimated_cost, remarks) VALUES (?, ?, ?, ?, ?, ?)");
+    $total = 0.0;
+    foreach ($ready as $line) {
+        $itemStmt->execute([$requestId, $line['material_id'], $line['qty'], $line['unit'], $line['cost'], $line['name']]);
+        $total += $line['qty'] * $line['cost'];
+    }
+    return round($total, 2);
+}
+
+function projectQuotationAttachment(PDO $pdo, int $projectId): ?array
+{
+    $stmt = $pdo->prepare("SELECT quotation_path, quotation_name FROM projects WHERE id = ?");
+    $stmt->execute([$projectId]);
+    $row = $stmt->fetch();
+    if (!$row || empty($row['quotation_path'])) {
+        return null;
+    }
+    $relative = str_replace('\\', '/', (string) $row['quotation_path']);
+    if (!preg_match('#^uploads/(project_quotations|quotations)/[A-Za-z0-9._-]+$#', $relative)) {
+        return null;
+    }
+    $absolute = dirname(__DIR__) . '/' . $relative;
+    $root = realpath(dirname(__DIR__) . '/uploads');
+    $real = realpath($absolute);
+    if ($root === false || $real === false || !is_file($real)) {
+        return null;
+    }
+    $root = rtrim(str_replace('\\', '/', $root), '/') . '/';
+    $real = str_replace('\\', '/', $real);
+    if (!str_starts_with($real, $root)) {
+        return null;
+    }
+    $name = trim((string) ($row['quotation_name'] ?: basename($relative)));
+    $name = str_replace(['"', '\\', '/'], '', $name);
+    return [
+        'path' => $relative,
+        'name' => $name !== '' ? $name : basename($relative),
+        'absolute' => $real,
+    ];
+}
+
+function projectQuotationDownloadUrl(int $projectId): string
+{
+    return APP_URL . 'modules/projects/quotation_download.php?project_id=' . $projectId;
+}
+
 function quotationNormalizeDate(string $value): string
 {
     $value = trim($value);

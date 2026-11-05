@@ -1,8 +1,15 @@
 <?php
 require_once '../../config/database.php';
 require_once '../../includes/auth.php';
+require_once '../../includes/warehouse_release.php';
 
 requireDepartment(['procurement']);
+
+try {
+    connectUnlinkedProcurementMaterialRequests($pdo);
+} catch (Throwable $e) {
+    error_log('[Runeha ERP] connect warehouse material requests: ' . $e->getMessage());
+}
 
 $page_title = 'Material Requests';
 
@@ -34,11 +41,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['send_to_warehouse']))
     }
     $po_id = (int) ($_POST['po_id'] ?? 0);
     try {
-        $stmt = $pdo->prepare("UPDATE purchase_orders SET status = 'ready_for_warehouse' WHERE id = ? AND status IN ('confirmed', 'sent')");
-        $stmt->execute([$po_id]);
-        $_SESSION['success'] = $stmt->rowCount()
-            ? 'The order has been sent to the Warehouse. They will receive it, then release it to the Engineering site.'
-            : 'Set the order to Sent or Confirmed before sending it to Warehouse.';
+        $sendError = sendPurchaseOrderToWarehouse($po_id);
+        $_SESSION[$sendError === '' ? 'success' : 'error'] = $sendError === ''
+            ? 'The order has been sent to the Warehouse. They will receive it on Receiving. You are still in Procurement.'
+            : $sendError;
     } catch (PDOException $e) {
         $_SESSION['error'] = userDatabaseError($e, 'Procurement');
     }
@@ -135,7 +141,7 @@ include '../../includes/header.php';
                                 <button class="btn btn-sm btn-primary" type="submit">Accept</button>
                             </form>
                         <?php elseif (in_array($request['status'], ['approved', 'confirmed'], true) && canWriteDepartmentData('procurement')): ?>
-                            <a class="btn btn-sm btn-primary" href="quotations.php?action=add&pr=<?php echo (int) $request['id']; ?>">Compare prices</a>
+                            <a class="btn btn-sm btn-primary" href="buying.php?request=<?php echo (int) $request['id']; ?>">Choose supplier</a>
                         <?php else: ?>
                             <a class="btn btn-sm btn-outline" href="purchase_requests.php?action=view&id=<?php echo (int) $request['id']; ?>">Open</a>
                         <?php endif; ?>

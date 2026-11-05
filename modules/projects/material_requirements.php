@@ -1,6 +1,7 @@
 <?php
 require_once '../../config/database.php';
 require_once '../../includes/auth.php';
+require_once '../../includes/warehouse_release.php';
 
 requireDepartment(['engineering']);
 
@@ -106,11 +107,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['request_warehouse_rel
             if (!$exists) {
                 throw new RuntimeException('Warehouse material_requests table is not ready.');
             }
-            $stmt = $pdo->prepare("INSERT INTO material_requests (project_id, material_id, quantity, request_date, status, requested_by, notes) VALUES (?, ?, ?, CURDATE(), 'pending', ?, ?)");
+            $pdo->beginTransaction();
+            $stmt = $pdo->prepare("INSERT INTO material_requests (project_id, material_id, quantity, request_date, status, flow_status, requested_by, notes) VALUES (?, ?, ?, CURDATE(), 'pending', 'procurement', ?, ?)");
             $stmt->execute([$req_project, $req_material, $req_qty, $_SESSION['user_id'], trim($_POST['notes'] ?? '')]);
+            $materialRequestId = (int) $pdo->lastInsertId();
+            $prNumber = connectMaterialRequestToProcurement($pdo, $materialRequestId);
+            if ($pdo->inTransaction()) {
+                $pdo->commit();
+            }
             logActivity($_SESSION['user_id'], 'Requested warehouse release', 'Projects', "Project $req_project material $req_material qty $req_qty");
-            $_SESSION['success'] = 'Material request sent to Warehouse for release.';
+            $_SESSION['success'] = $prNumber
+                ? $prNumber . ' was sent to Procurement. After it is approved, create the purchase order so Accounting can pay it.'
+                : 'Material request sent to Procurement.';
         } catch (Throwable $e) {
+            if ($pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
             $_SESSION['error'] = $e instanceof PDOException ? userDatabaseError($e, 'Projects') : $e->getMessage();
         }
     }
@@ -228,7 +240,7 @@ include '../../includes/header.php';
 <?php if (canRequestWarehouseRelease()): ?>
 <div class="card">
     <h3>Request warehouse release</h3>
-    <p class="muted-note">1. Project in-charge requests materials here. 2. Warehouse releases stock if it is on hand. 3. If stock is short, Warehouse sends a purchase request and Procurement buys it.</p>
+    <p class="muted-note">This request is sent to Procurement. After it is approved, create the purchase order. Accounting pays that order, then Warehouse can receive and release the material.</p>
     <form method="POST">
         <div class="form-group">
             <label>Project</label>
@@ -408,7 +420,7 @@ try {
                         <td><?php echo $material['pr_count']; ?></td>
                         <td>
                             <?php if (canViewModule('procurement')): ?>
-                            <a href="received_projects.php<?php echo $project_id > 0 ? '?id=' . $project_id : ''; ?>" class="btn btn-sm btn-primary"><i class="fas fa-paper-plane"></i> Request</a>
+                            <a href="received_projects.php?requests=1<?php echo $project_id > 0 ? '&id=' . $project_id : ''; ?>" class="btn btn-sm btn-primary"><i class="fas fa-paper-plane"></i> Request</a>
                             <?php endif; ?>
                         </td>
                     </tr>
@@ -454,7 +466,7 @@ try {
                     <td><?php echo $material['pending_pr_count']; ?></td>
                     <td>
                         <?php if (canViewModule('procurement')): ?>
-                        <a href="received_projects.php<?php echo $project_id > 0 ? '?id=' . $project_id : ''; ?>" class="btn btn-sm btn-primary"><i class="fas fa-paper-plane"></i> Request</a>
+                        <a href="received_projects.php?requests=1<?php echo $project_id > 0 ? '&id=' . $project_id : ''; ?>" class="btn btn-sm btn-primary"><i class="fas fa-paper-plane"></i> Request</a>
                         <?php endif; ?>
                     </td>
                 </tr>
@@ -508,7 +520,7 @@ try {
                         <td><?php echo $material['project_count']; ?></td>
                         <td>
                             <?php if (canViewModule('procurement')): ?>
-                            <a href="received_projects.php<?php echo $project_id > 0 ? '?id=' . $project_id : ''; ?>" class="btn btn-sm btn-primary"><i class="fas fa-paper-plane"></i> Request</a>
+                            <a href="received_projects.php?requests=1<?php echo $project_id > 0 ? '&id=' . $project_id : ''; ?>" class="btn btn-sm btn-primary"><i class="fas fa-paper-plane"></i> Request</a>
                             <?php endif; ?>
                         </td>
                     </tr>

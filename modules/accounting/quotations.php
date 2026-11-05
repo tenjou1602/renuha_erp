@@ -163,9 +163,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if ($extracted && !$project_id) {
                 throw new RuntimeException('Select the project code this quotation is for.');
             }
-            $lines = ($extracted && !empty($extracted['items']))
+            $fromFile = $extracted && !empty($extracted['items']);
+            $lines = $fromFile
                 ? quotationLinesFromExtract($extracted['items'])
                 : quotationLinesFromPost($_POST['items'] ?? []);
+            if (!$fromFile && isset($_POST['update_quotation']) && $id > 0) {
+                $savedLineStmt = $pdo->prepare("SELECT item_name, description, quantity, unit, unit_price, line_type, material_id FROM client_quotation_items WHERE quotation_id = ? ORDER BY id");
+                $savedLineStmt->execute([$id]);
+                $savedLines = [];
+                foreach ($savedLineStmt->fetchAll() as $savedLine) {
+                    $savedKey = strtolower(trim((string) $savedLine['item_name']));
+                    if ($savedKey !== '' && !isset($savedLines[$savedKey])) {
+                        $savedLines[$savedKey] = $savedLine;
+                    }
+                }
+                foreach ($lines as $lineIndex => $line) {
+                    $savedKey = strtolower(trim((string) $line['item_name']));
+                    if (!isset($savedLines[$savedKey])) {
+                        continue;
+                    }
+                    $savedLine = $savedLines[$savedKey];
+                    $lines[$lineIndex]['description'] = (string) $savedLine['description'];
+                    $lines[$lineIndex]['quantity'] = (float) $savedLine['quantity'];
+                    $lines[$lineIndex]['unit'] = (string) $savedLine['unit'];
+                    $lines[$lineIndex]['unit_price'] = (float) $savedLine['unit_price'];
+                    $lines[$lineIndex]['line_total'] = round((float) $savedLine['quantity'] * (float) $savedLine['unit_price'], 2);
+                }
+            }
             $subtotal = 0.0;
             foreach ($lines as $line) {
                 $subtotal += $line['line_total'];
@@ -185,7 +209,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $existing->execute([$id]);
                 $current = $existing->fetch();
                 if (!$current || in_array($current['status'], ['converted', 'approved'], true)) {
-                    throw new RuntimeException('This quotation can no longer be edited.');
+                    throw new RuntimeException('Approved na ang quotation. Hindi na puwedeng baguhin ang status o ang materials.');
                 }
                 $stmt = $pdo->prepare("UPDATE client_quotations SET client_id = ?, client_name = ?, project_id = ?, scope_of_work = ?, validity_date = ?, status = ?, subtotal = ?, grand_total = ?, notes = ? WHERE id = ?");
                 $stmt->execute([$client_id, $client_name, $project_id, $scope, $validity, $status, $subtotal, $subtotal, $notes, $id]);
@@ -234,16 +258,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $allowed = [
                 'draft' => ['sent', 'approved', 'rejected'],
                 'sent' => ['approved', 'rejected', 'draft'],
-                'approved' => ['rejected'],
                 'rejected' => ['draft'],
             ];
+            if (in_array($quote['status'], ['approved', 'converted'], true)) {
+                throw new RuntimeException('Approved na ang quotation. Hindi na puwedeng baguhin ang status.');
+            }
             if (!in_array($next, $allowed[$quote['status']] ?? [], true)) {
                 throw new RuntimeException('That status change is not allowed.');
             }
             $pdo->prepare("UPDATE client_quotations SET status = ? WHERE id = ?")->execute([$next, $quoteId]);
             logActivity($_SESSION['user_id'], 'Updated quotation status', 'Accounting', $quote['quotation_number'] . ' -> ' . $next);
             $_SESSION['success'] = $next === 'approved'
-                ? 'Quotation approved. Executive Admin can encode it as a project from Manage Projects.'
+                ? 'Quotation approved. Naka-lock na ang status at ang materials. Hindi na ito puwedeng i-reject o ibalik sa pending.'
                 : 'Quotation status updated.';
             header('Location: quotations.php?action=view&id=' . $quoteId);
             exit();
@@ -359,8 +385,20 @@ try {
     $error = $error ?: userDatabaseError($e);
 }
 
+$projectViewId = (int) ($_GET['project'] ?? 0);
+if ($action === 'add' && $projectViewId > 0) {
+    header('Location: quotations.php?action=view&project=' . $projectViewId);
+    exit();
+}
+if ($action === 'view' && $id <= 0 && $projectViewId > 0) {
+    $existingQuote = $pdo->prepare("SELECT id FROM client_quotations WHERE project_id = ? ORDER BY id DESC LIMIT 1");
+    $existingQuote->execute([$projectViewId]);
+    $id = (int) $existingQuote->fetchColumn();
+}
+
 $quotation = null;
 $quotation_items = [];
+$quotationFileView = false;
 if (in_array($action, ['edit', 'view'], true) && $id > 0) {
     $stmt = $pdo->prepare("
         SELECT q.*, p.name AS project_name, p.project_code, u.full_name AS created_by_name
@@ -377,6 +415,51 @@ if (in_array($action, ['edit', 'view'], true) && $id > 0) {
         $quotation_items = $items->fetchAll();
     }
 }
+if ($action === 'view' && !$quotation && $projectViewId > 0) {
+    $projectStmt = $pdo->prepare("SELECT id, project_code, name, client, location, subject, quotation_path, quotation_name, estimated_budget, accounting_status FROM projects WHERE id = ?");
+    $projectStmt->execute([$projectViewId]);
+    $sourceProject = $projectStmt->fetch();
+    if ($sourceProject) {
+        $extractedFile = null;
+        if (!empty($sourceProject['quotation_path'])) {
+            try {
+                $extractedFile = extractQuotationPath($sourceProject['quotation_path'], (string) $sourceProject['quotation_name']);
+            } catch (Throwable $e) {
+                $extractedFile = null;
+            }
+        }
+        $previewItems = $extractedFile['items'] ?? [];
+        $previewTotal = 0.0;
+        foreach ($previewItems as $previewItem) {
+            $lineTotal = round((float) ($previewItem['quantity'] ?? 0) * (float) ($previewItem['unit_price'] ?? 0), 2);
+            $quotation_items[] = [
+                'item_name' => $previewItem['item_name'] ?? ($previewItem['description'] ?? ''),
+                'description' => $previewItem['description'] ?? '',
+                'quantity' => $previewItem['quantity'] ?? 0,
+                'unit' => $previewItem['unit'] ?? '',
+                'unit_price' => $previewItem['unit_price'] ?? 0,
+                'line_total' => $lineTotal,
+            ];
+            $previewTotal += $lineTotal;
+        }
+        $quotation = [
+            'id' => 0,
+            'quotation_number' => $sourceProject['project_code'],
+            'client_name' => $extractedFile['client'] ?? ($sourceProject['client'] ?? ''),
+            'project_code' => $sourceProject['project_code'],
+            'project_name' => $sourceProject['name'],
+            'status' => accountingDecisionLabel($sourceProject['accounting_status'] ?? ''),
+            'validity_date' => $extractedFile['validity_date'] ?? '',
+            'grand_total' => $previewTotal > 0 ? $previewTotal : (float) $sourceProject['estimated_budget'],
+            'created_by_name' => 'Executive Admin file',
+            'scope_of_work' => $extractedFile['scope'] ?? ($sourceProject['subject'] ?? ''),
+            'notes' => trim((string) ($extractedFile['notes'] ?? '')),
+            'attachment_path' => $sourceProject['quotation_path'] ?? '',
+            'attachment_name' => $sourceProject['quotation_name'] ?? '',
+        ];
+        $quotationFileView = true;
+    }
+}
 
 if ($action === 'add' || $action === 'edit') {
     if (!canWriteDepartmentData('accounting')) {
@@ -385,7 +468,7 @@ if ($action === 'add' || $action === 'edit') {
         exit();
     }
     if ($action === 'edit' && $quotation && in_array($quotation['status'], ['approved', 'converted'], true)) {
-        $_SESSION['error'] = 'Approved and converted quotations cannot be edited.';
+        $_SESSION['error'] = 'Approved na ang quotation. Hindi na puwedeng baguhin ang status o ang materials.';
         header('Location: quotations.php?action=view&id=' . $id);
         exit();
     }
@@ -525,18 +608,19 @@ include '../../includes/header.php';
                 </thead>
                 <tbody>
                     <?php foreach ($form_items as $index => $line): ?>
-                    <tr class="line-row">
+                    <?php $excelRow = trim((string) ($line['item_name'] ?? $line['description'] ?? '')) !== ''; ?>
+                    <tr class="line-row" <?php echo $excelRow ? 'data-excel="1"' : ''; ?>>
                         <td>
-                            <input type="text" name="items[<?php echo $index; ?>][item_name]" class="line-item" value="<?php echo htmlspecialchars($line['item_name'] ?? $line['description'] ?? ''); ?>" placeholder="Item name">
+                            <input type="text" name="items[<?php echo $index; ?>][item_name]" class="line-item" value="<?php echo htmlspecialchars($line['item_name'] ?? $line['description'] ?? ''); ?>" placeholder="Item name" <?php echo $excelRow ? 'readonly style="background:#f8fafc;"' : ''; ?>>
                             <input type="hidden" name="items[<?php echo $index; ?>][line_type]" class="line-type" value="other">
                             <input type="hidden" name="items[<?php echo $index; ?>][material_id]" class="material-id" value="<?php echo (int) ($line['material_id'] ?? 0); ?>">
                         </td>
-                        <td><textarea name="items[<?php echo $index; ?>][description]" class="line-desc" rows="2" placeholder="Section or details"><?php echo htmlspecialchars((isset($line['item_name']) && $line['item_name'] !== '' && strcasecmp((string) $line['item_name'], (string) ($line['description'] ?? '')) === 0) ? '' : ($line['description'] ?? '')); ?></textarea></td>
-                        <td><input type="number" step="0.01" min="0" name="items[<?php echo $index; ?>][quantity]" class="line-qty" value="<?php echo htmlspecialchars($line['quantity'] ?? 1); ?>"></td>
-                        <td><input type="text" name="items[<?php echo $index; ?>][unit]" class="line-unit" value="<?php echo htmlspecialchars($line['unit'] ?? 'lot'); ?>"></td>
-                        <td><input type="number" step="0.01" min="0" name="items[<?php echo $index; ?>][unit_price]" class="line-price" value="<?php echo htmlspecialchars($line['unit_price'] ?? 0); ?>"></td>
+                        <td><textarea name="items[<?php echo $index; ?>][description]" class="line-desc" rows="2" placeholder="Section or details" <?php echo $excelRow ? 'readonly style="background:#f8fafc;"' : ''; ?>><?php echo htmlspecialchars((isset($line['item_name']) && $line['item_name'] !== '' && strcasecmp((string) $line['item_name'], (string) ($line['description'] ?? '')) === 0) ? '' : ($line['description'] ?? '')); ?></textarea></td>
+                        <td><input type="<?php echo $excelRow ? 'text' : 'number'; ?>" <?php echo $excelRow ? '' : 'step="0.01" min="0"'; ?> name="items[<?php echo $index; ?>][quantity]" class="line-qty" value="<?php echo htmlspecialchars($line['quantity'] ?? 1); ?>" <?php echo $excelRow ? 'readonly style="background:#f8fafc;"' : ''; ?>></td>
+                        <td><input type="text" name="items[<?php echo $index; ?>][unit]" class="line-unit" value="<?php echo htmlspecialchars($line['unit'] ?? 'lot'); ?>" <?php echo $excelRow ? 'readonly style="background:#f8fafc;"' : ''; ?>></td>
+                        <td><input type="text" inputmode="decimal" autocomplete="off" name="items[<?php echo $index; ?>][unit_price]" class="line-price" value="<?php echo htmlspecialchars($line['unit_price'] ?? 0); ?>" <?php echo $excelRow ? 'readonly style="background:#f8fafc;"' : ''; ?>></td>
                         <td class="line-total">₱0.00</td>
-                        <td><button type="button" class="btn btn-sm btn-secondary remove-line">Remove</button></td>
+                        <td><?php if (!$excelRow): ?><button type="button" class="btn btn-sm btn-secondary remove-line">Remove</button><?php endif; ?></td>
                     </tr>
                     <?php endforeach; ?>
                 </tbody>
@@ -564,7 +648,7 @@ include '../../includes/header.php';
         <td><textarea class="line-desc" rows="2" placeholder="Section or details"></textarea></td>
         <td><input type="number" step="0.01" min="0" class="line-qty" value="1"></td>
         <td><input type="text" class="line-unit" value="lot"></td>
-        <td><input type="number" step="0.01" min="0" class="line-price" value="0"></td>
+        <td><input type="text" inputmode="decimal" autocomplete="off" class="line-price" value="0"></td>
         <td class="line-total">₱0.00</td>
         <td><button type="button" class="btn btn-sm btn-secondary remove-line">Remove</button></td>
     </tr>
@@ -584,6 +668,17 @@ include '../../includes/header.php';
             row.querySelector('.line-price').name = 'items[' + i + '][unit_price]';
         });
     }
+    function lockExcelRow(row) {
+        if (!row) return;
+        row.dataset.excel = '1';
+        row.querySelectorAll('.line-item, .line-desc, .line-qty, .line-unit, .line-price').forEach((input) => {
+            input.type = 'text';
+            input.readOnly = true;
+            input.style.background = '#f8fafc';
+            input.title = 'This came from the Excel file and cannot be changed.';
+        });
+        row.querySelector('.remove-line')?.remove();
+    }
     function recalc() {
         let subtotal = 0;
         table.querySelectorAll('.line-row').forEach((row) => {
@@ -600,9 +695,11 @@ include '../../includes/header.php';
     table.addEventListener('input', recalc);
     table.addEventListener('click', (event) => {
         if (!event.target.closest('.remove-line')) return;
+        const row = event.target.closest('.line-row');
+        if (!row || row.dataset.excel === '1') return;
         const rows = table.querySelectorAll('.line-row');
         if (rows.length === 1) return;
-        event.target.closest('.line-row').remove();
+        row.remove();
         reindex();
         recalc();
     });
@@ -664,7 +761,28 @@ include '../../includes/header.php';
             document.querySelector('[name="scope_of_work"]').value = data.scope;
         }
         if (data.notes) {
-            document.querySelector('[name="notes"]').value = data.notes;
+            const notes = document.querySelector('[name="notes"]');
+            notes.value = data.notes;
+            notes.readOnly = true;
+            notes.style.background = '#f8fafc';
+        }
+        if (data.scope) {
+            const scope = document.querySelector('[name="scope_of_work"]');
+            scope.readOnly = true;
+            scope.style.background = '#f8fafc';
+        }
+        const clientSelect = document.getElementById('clientName');
+        if (data.client && clientSelect && clientSelect.value) {
+            clientSelect.disabled = true;
+            clientSelect.style.background = '#f8fafc';
+            if (!document.getElementById('lockedClientId')) {
+                const hiddenClient = document.createElement('input');
+                hiddenClient.type = 'hidden';
+                hiddenClient.name = 'client_id';
+                hiddenClient.id = 'lockedClientId';
+                hiddenClient.value = clientSelect.value;
+                clientSelect.form?.appendChild(hiddenClient);
+            }
         }
         if (Array.isArray(data.items) && data.items.length) {
             table.innerHTML = '';
@@ -672,11 +790,14 @@ include '../../includes/header.php';
                 const row = document.getElementById('lineTemplate').content.firstElementChild.cloneNode(true);
                 row.querySelector('.line-item').value = item.item_name || item.description || '';
                 row.querySelector('.line-desc').value = item.item_name ? (item.description || '') : '';
-                row.querySelector('.line-qty').value = item.quantity || 1;
+                row.querySelector('.line-qty').value = item.quantity ?? 1;
                 row.querySelector('.line-unit').value = item.unit || 'pcs';
-                row.querySelector('.line-price').value = item.unit_price || 0;
+                row.querySelector('.line-price').value = item.unit_price ?? 0;
+                lockExcelRow(row);
                 table.appendChild(row);
             });
+            const addLine = document.getElementById('addLine');
+            if (addLine) addLine.hidden = true;
             reindex();
             recalc();
         }
@@ -709,7 +830,7 @@ include '../../includes/header.php';
                 return;
             }
             applyExtracted(data);
-            status.textContent = 'Client, subject, and items came from the quotation file Executive Admin attached. Review them, then save.';
+            status.textContent = 'The Excel details are locked. Item, section, quantity, unit, and price cannot be changed.';
         } catch (error) {
             status.textContent = 'Could not open the quotation file.';
         } finally {
@@ -737,7 +858,7 @@ include '../../includes/header.php';
                 return;
             }
             applyExtracted(data);
-            status.textContent = 'Client and items are from the file. Select the project code, then save.';
+            status.textContent = 'The Excel details are locked. Select the project code, then save.';
             projectSelect.focus();
         } catch (error) {
             status.textContent = 'Could not read the file.';
@@ -756,7 +877,7 @@ include '../../includes/header.php';
 <?php elseif ($action === 'view' && $quotation): ?>
 <div class="card">
     <h3>Quotation <?php echo htmlspecialchars($quotation['quotation_number']); ?></h3>
-    <p style="color:#64748b;">This document is a proposal. <?php echo $quotation['status'] === 'converted' ? 'The accounting entry was created on the invoice.' : 'It has no accounting entry.'; ?></p>
+    <p style="color:#64748b;"><?php echo $quotationFileView ? 'Viewing only. The quotation file cannot be edited.' : ('This document is a proposal. ' . ($quotation['status'] === 'converted' ? 'The accounting entry was created on the invoice.' : 'It has no accounting entry.')); ?></p>
     <div class="view-details">
         <div class="detail-row"><span>Client Name:</span> <strong><?php echo htmlspecialchars($quotation['client_name']); ?></strong></div>
         <div class="detail-row"><span>Project:</span> <?php echo htmlspecialchars($quotation['project_code'] ? $quotation['project_code'] . ' - ' . $quotation['project_name'] : 'N/A'); ?></div>
@@ -794,9 +915,8 @@ include '../../includes/header.php';
         </table>
     </div>
     <div style="margin-top:1.5rem;display:flex;gap:0.5rem;flex-wrap:wrap;">
-        <?php if (canWriteDepartmentData('accounting') && $quotation['status'] !== 'converted'): ?>
-            <?php if (in_array($quotation['status'], ['draft', 'sent'], true)): ?>
-                <a href="?action=edit&id=<?php echo (int) $quotation['id']; ?>" class="btn btn-warning"><i class="fas fa-edit"></i> Edit</a>
+        <?php if (!$quotationFileView && canWriteDepartmentData('accounting') && $quotation['status'] !== 'converted'): ?>
+            <?php if (!$quotationFileView && in_array($quotation['status'], ['draft', 'sent'], true)): ?>
                 <form method="POST">
                     <input type="hidden" name="set_status" value="1">
                     <input type="hidden" name="quotation_id" value="<?php echo (int) $quotation['id']; ?>">
@@ -812,13 +932,16 @@ include '../../includes/header.php';
                     <button type="submit" class="btn btn-secondary">Mark Sent</button>
                 </form>
             <?php endif; ?>
-            <?php if (in_array($quotation['status'], ['draft', 'sent', 'approved'], true)): ?>
+            <?php if (in_array($quotation['status'], ['draft', 'sent'], true)): ?>
                 <form method="POST">
                     <input type="hidden" name="set_status" value="1">
                     <input type="hidden" name="quotation_id" value="<?php echo (int) $quotation['id']; ?>">
                     <input type="hidden" name="next_status" value="rejected">
                     <button type="submit" class="btn btn-secondary">Reject</button>
                 </form>
+            <?php endif; ?>
+            <?php if ($quotation['status'] === 'approved'): ?>
+                <span class="badge badge-success">Approved. Status and materials are locked.</span>
             <?php endif; ?>
             <?php if ($quotation['status'] === 'rejected'): ?>
                 <form method="POST">
@@ -839,7 +962,7 @@ include '../../includes/header.php';
             <?php endif; ?>
         <?php endif; ?>
         <?php if ($quotation['status'] === 'approved' && empty($quotation['project_id'])): ?>
-            <a href="<?php echo APP_URL; ?>modules/projects/projects.php?action=add&source=quotation:<?php echo (int) $quotation['id']; ?>" class="btn btn-primary"><i class="fas fa-building"></i> Create Project</a>
+            <a href="<?php echo APP_URL; ?>modules/projects/projects.php?action=add&source=quotation:<?php echo (int) $quotation['id']; ?>" class="btn btn-primary"><i class="fas fa-building"></i> Encode Project</a>
         <?php endif; ?>
         <a href="quotations.php" class="btn btn-secondary"><i class="fas fa-arrow-left"></i> Back</a>
     </div>
@@ -875,7 +998,7 @@ include '../../includes/header.php';
                         <td>
                             <a href="?action=view&id=<?php echo (int) $quote['id']; ?>" class="btn btn-sm btn-info"><i class="fas fa-eye"></i></a>
                             <?php if ($quote['status'] === 'approved' && empty($quote['project_id'])): ?>
-                                <a href="<?php echo APP_URL; ?>modules/projects/projects.php?action=add&source=quotation:<?php echo (int) $quote['id']; ?>" class="btn btn-sm btn-primary" title="Create project">Create</a>
+                                <a href="<?php echo APP_URL; ?>modules/projects/projects.php?action=add&source=quotation:<?php echo (int) $quote['id']; ?>" class="btn btn-sm btn-primary" title="Encode project">Encode</a>
                             <?php endif; ?>
                         </td>
                     </tr>

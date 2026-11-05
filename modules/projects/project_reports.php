@@ -51,6 +51,7 @@ try {
                         vpc.actual_cost,
                         p.start_date,
                         p.end_date,
+                        p.completion_date,
                         (vpc.actual_cost / GREATEST(p.estimated_budget, 1)) * 100 as budget_utilization,
                         COUNT(DISTINCT a.id) as accomplishment_count,
                         COUNT(DISTINCT att.id) as attachment_count
@@ -58,7 +59,7 @@ try {
                     LEFT JOIN v_project_costs vpc ON vpc.project_id = p.id
                     LEFT JOIN accomplishments a ON p.id = a.project_id
                     LEFT JOIN attachments att ON p.id = att.project_id
-                    GROUP BY p.id, p.project_code, p.name, p.status, p.estimated_budget, vpc.actual_cost, p.start_date, p.end_date
+                    GROUP BY p.id, p.project_code, p.name, p.status, p.estimated_budget, vpc.actual_cost, p.start_date, p.end_date, p.completion_date
                     ORDER BY p.created_at DESC
                 ")->fetchAll();
             } catch (PDOException $e) {
@@ -72,13 +73,14 @@ try {
                         vpc.actual_cost,
                         p.start_date,
                         p.end_date,
+                        p.completion_date,
                         (vpc.actual_cost / GREATEST(p.estimated_budget, 1)) * 100 as budget_utilization,
                         COUNT(DISTINCT a.id) as accomplishment_count,
                         0 as attachment_count
                     FROM projects p
                     LEFT JOIN v_project_costs vpc ON vpc.project_id = p.id
                     LEFT JOIN accomplishments a ON p.id = a.project_id
-                    GROUP BY p.id, p.project_code, p.name, p.status, p.estimated_budget, vpc.actual_cost, p.start_date, p.end_date
+                    GROUP BY p.id, p.project_code, p.name, p.status, p.estimated_budget, vpc.actual_cost, p.start_date, p.end_date, p.completion_date
                     ORDER BY p.created_at DESC
                 ")->fetchAll();
             }
@@ -276,6 +278,9 @@ include '../../includes/header.php';
 
 <div class="page-header">
     <h1><i class="fas fa-chart-bar"></i> <?php echo $page_title; ?></h1>
+    <div class="action-row">
+        <a class="btn btn-outline" href="transaction_record.php">Transaction Record</a>
+    </div>
 </div>
 
 <?php if (isset($error)): ?>
@@ -426,8 +431,8 @@ if (statusBreakdownCtx) {
                     </td>
                     <td><?php echo $project['accomplishment_count']; ?></td>
                     <td><?php echo $project['attachment_count']; ?></td>
-                    <td><?php echo $project['start_date'] ? date('M d, Y', strtotime($project['start_date'])) : 'N/A'; ?></td>
-                    <td><?php echo $project['end_date'] ? date('M d, Y', strtotime($project['end_date'])) : 'N/A'; ?></td>
+                    <td><?php echo formatDisplayDate($project['start_date'] ?? null); ?></td>
+                    <td><?php echo projectScheduleLabel($project['end_date'] ?? null, $project['completion_date'] ?? null, (string) ($project['status'] ?? '')); ?></td>
                 </tr>
                 <?php endforeach; ?>
             </tbody>

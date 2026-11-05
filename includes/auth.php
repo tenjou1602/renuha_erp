@@ -115,12 +115,11 @@ if (!function_exists('checkAuth')) {
 
     /**
      * Operational create/edit in department modules.
-     * Admin is view-only across departments (except PR confirm via canConfirmPurchaseRequest).
-     * Department managers retain edit rights on their module's data.
+     * Executive Admin may act in every department. Managers keep their own module.
      */
     function canEdit($module = null) {
         if (!isLoggedIn()) return false;
-        if (isAdmin()) return false;
+        if (isAdmin()) return $module === null || canViewModule($module);
         if ($_SESSION['role'] !== 'manager') return false;
         if ($module === null) return true;
         return canViewModule($module);
@@ -139,14 +138,58 @@ if (!function_exists('checkAuth')) {
     }
 
     /**
-     * Whether the current user may perform operational writes (add/edit/delete/stock)
-     * in a department module. Admin is view-only; department members may write.
+     * Operational writes in a department module.
+     * Executive Admin passes every department. Other roles stay inside their own.
      */
     function canWriteDepartmentData($module = null) {
         if (!isLoggedIn()) return false;
-        if (isAdmin()) return false;
+        if (isAdmin()) return true;
         if ($module === null) return true;
         return canViewModule($module);
+    }
+
+    function runehaCurrentModule(): string {
+        $module = basename(dirname($_SERVER['PHP_SELF'] ?? ''));
+        if ($module !== 'adjustments') {
+            return $module;
+        }
+        $dept = $_GET['department'] ?? 'admin';
+        if ($dept === 'engineering') {
+            return 'projects';
+        }
+        if (in_array($dept, ['accounting', 'procurement', 'warehouse'], true)) {
+            return $dept;
+        }
+        return 'admin';
+    }
+
+    function isViewingAsAdmin(): bool {
+        if (!isAdmin()) {
+            return false;
+        }
+        $module = runehaCurrentModule();
+        $page = basename($_SERVER['PHP_SELF'] ?? '');
+        if ($module === 'projects' && $page === 'projects.php') {
+            return false;
+        }
+        return in_array($module, ['accounting', 'procurement', 'warehouse', 'projects'], true);
+    }
+
+    function adminModeLabel(): string {
+        $names = [
+            'accounting' => 'Accounting',
+            'procurement' => 'Procurement',
+            'warehouse' => 'Warehouse',
+            'projects' => 'Engineering',
+        ];
+        return $names[runehaCurrentModule()] ?? 'Department';
+    }
+
+    function ownsRecord($ownerId): bool {
+        if (!isLoggedIn()) {
+            return false;
+        }
+        return (int) $ownerId > 0 && (int) $ownerId === (int) ($_SESSION['user_id'] ?? 0);
     }
 
     /**
@@ -175,7 +218,8 @@ if (!function_exists('checkAuth')) {
 
     /** Engineering submits needs to Procurement; Procurement can also encode PRs. */
     function canSubmitMaterialRequirement() {
-        if (!isLoggedIn() || isAdmin()) return false;
+        if (!isLoggedIn()) return false;
+        if (isAdmin()) return true;
         return canViewModule('projects') || canWriteDepartmentData('procurement');
     }
 

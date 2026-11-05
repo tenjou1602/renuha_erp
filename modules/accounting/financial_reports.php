@@ -369,6 +369,9 @@ include '../../includes/header.php';
 
 <div class="page-header">
     <h1><i class="fas fa-chart-bar"></i> <?php echo $page_title; ?></h1>
+    <div class="action-row">
+        <a class="btn btn-outline" href="transaction_record.php">Transaction Record</a>
+    </div>
 </div>
 
 <?php if (isset($error)): ?>

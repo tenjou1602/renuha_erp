@@ -279,6 +279,7 @@ include '../../includes/header.php';
     <div style="margin-top:1.5rem; display:flex; gap:0.5rem; flex-wrap:wrap;">
         <?php if (canWriteDepartmentData('procurement')): ?><a href="?action=edit&id=<?php echo $order_details['id']; ?>" class="btn btn-warning"><i class="fas fa-edit"></i> Edit</a><?php endif; ?>
         <?php if (canDelete('procurement')): ?><a href="?action=delete&delete_id=<?php echo $order_details['id']; ?>" class="btn btn-danger" onclick="return confirm('Are you sure you want to delete this purchase order?')"><i class="fas fa-trash"></i> Delete</a><?php endif; ?>
+        <a class="btn btn-outline" href="purchase_order_print.php?id=<?php echo (int) $order_details['id']; ?>">Print / PDF</a>
         <a href="purchase_history.php" class="btn btn-secondary"><i class="fas fa-arrow-left"></i> Back</a>
     </div>
 </div>

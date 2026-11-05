@@ -4,13 +4,59 @@ $active_projects = (int) ($stats['ongoing_projects'] ?? 0);
 $completed_projects = (int) ($stats['completed_projects'] ?? 0);
 $pending_projects = (int) ($stats['pending_projects'] ?? 0);
 $delayed_projects = (int) ($stats['delayed_projects'] ?? 0);
-$status_counts = [
-    'Completed' => $completed_projects,
-    'Active' => $active_projects,
-    'Pending' => $pending_projects,
-    'Delayed' => $delayed_projects,
+$status_labels = [
+    'draft' => 'Draft',
+    'quotation' => 'Quotation',
+    'approved' => 'Approved',
+    'accounting_setup' => 'Accounting Setup',
+    'assigned' => 'Assigned',
+    'planning' => 'Planning',
+    'material_request' => 'Material Request',
+    'procurement' => 'Procurement',
+    'material_available' => 'Material Available',
+    'implementation' => 'Implementation',
+    'ongoing' => 'Ongoing',
+    'on_hold' => 'On Hold',
+    'completed' => 'Completed',
 ];
-$status_colors = ['#22c55e', '#3b82f6', '#f59e0b', '#ef4444'];
+$status_palette = [
+    'assigned' => '#8b5cf6',
+    'planning' => '#f59e0b',
+    'ongoing' => '#3b82f6',
+    'on_hold' => '#f97316',
+    'completed' => '#22c55e',
+    'implementation' => '#06b6d4',
+    'material_request' => '#0ea5e9',
+    'procurement' => '#6366f1',
+];
+$status_counts = [];
+$status_colors = [];
+try {
+    $status_rows = $pdo->query("SELECT status, COUNT(*) AS total FROM projects WHERE archived_at IS NULL GROUP BY status")->fetchAll();
+    $by_status = [];
+    foreach ($status_rows as $status_row) {
+        $by_status[$status_row['status']] = (int) $status_row['total'];
+    }
+    foreach ($status_labels as $status_key => $status_label) {
+        if (empty($by_status[$status_key])) {
+            continue;
+        }
+        $status_counts[$status_label] = $by_status[$status_key];
+        $status_colors[] = $status_palette[$status_key] ?? '#64748b';
+        unset($by_status[$status_key]);
+    }
+    foreach ($by_status as $status_key => $status_total) {
+        $status_counts[ucwords(str_replace('_', ' ', (string) $status_key))] = $status_total;
+        $status_colors[] = '#64748b';
+    }
+} catch (Throwable $e) {
+    $status_counts = ['Completed' => $completed_projects, 'Planning' => $pending_projects, 'Ongoing' => $active_projects];
+    $status_colors = ['#22c55e', '#f59e0b', '#3b82f6'];
+}
+$donut_total = array_sum($status_counts);
+if ($donut_total > 0) {
+    $total_projects = $donut_total;
+}
 $chart_total = array_sum($status_counts);
 $activity_limit = array_slice($recent_department_activity ?? [], 0, 8);
 $dept_dot = [
@@ -28,7 +74,8 @@ $dept_dot = [
 .exec-dash .exec-head p { color:#64748b; margin:.25rem 0 0; font-size:.9rem; }
 .exec-dash .exec-date { color:#94a3b8; font-size:.85rem; font-weight:600; white-space:nowrap; }
 .exec-kpis { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:.9rem; margin-bottom:1rem; }
-.exec-kpi { background:#fff; border-radius:16px; padding:1rem 1.1rem; box-shadow:0 8px 24px rgba(15,23,42,.04); display:flex; align-items:center; gap:.85rem; border:1px solid #eef2f7; }
+.exec-kpi { background:#fff; border-radius:16px; padding:1rem 1.1rem; box-shadow:0 8px 24px rgba(15,23,42,.04); display:flex; align-items:center; gap:.85rem; border:1px solid #eef2f7; text-decoration:none; color:inherit; cursor:pointer; }
+.exec-kpi:hover, .exec-row:hover, .exec-fin a:hover, .exec-attn a:hover { transform:translateY(-1px); box-shadow:0 6px 16px rgba(15,23,42,.06); }
 .exec-kpi .ico { width:42px; height:42px; border-radius:12px; display:flex; align-items:center; justify-content:center; font-size:1.05rem; flex-shrink:0; }
 .exec-kpi { min-width:0; }
 .exec-kpi .num, .exec-funds .v { font-size:clamp(1.1rem, 1.6vw, 1.5rem); font-weight:800; line-height:1.2; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:100%; }
@@ -43,7 +90,7 @@ $dept_dot = [
 .exec-card h3 { font-size:.92rem; font-weight:700; margin:0 0 .85rem; display:flex; align-items:center; gap:.45rem; }
 .exec-card h3 i { color:#64748b; }
 .exec-fin { display:grid; grid-template-columns:1fr 1fr; gap:.55rem; }
-.exec-fin div { border-radius:12px; padding:.7rem .75rem; }
+.exec-fin a { display:block; border-radius:12px; padding:.7rem .75rem; text-decoration:none; color:inherit; cursor:pointer; }
 .exec-fin .k { font-size:.68rem; color:#64748b; font-weight:600; }
 .exec-fin .v { font-size:.95rem; font-weight:800; margin-top:.15rem; overflow-wrap:anywhere; word-break:break-word; line-height:1.25; }
 .exec-fin .c1 { background:#eff6ff; } .exec-fin .c1 .v { color:#2563eb; }
@@ -51,14 +98,15 @@ $dept_dot = [
 .exec-fin .c3 { background:#fff7ed; } .exec-fin .c3 .v { color:#ea580c; }
 .exec-fin .c4 { background:#f5f3ff; } .exec-fin .c4 .v { color:#7c3aed; }
 .exec-rows { display:flex; flex-direction:column; gap:.55rem; }
-.exec-row { display:flex; justify-content:space-between; align-items:center; font-size:.8rem; color:#475569; }
+.exec-row { display:flex; justify-content:space-between; align-items:center; font-size:.8rem; color:#475569; text-decoration:none; cursor:pointer; border-radius:8px; }
 .exec-row strong { color:#0f172a; font-size:.95rem; }
 .exec-dot { width:8px; height:8px; border-radius:50%; display:inline-block; margin-right:.45rem; }
 .exec-attn { list-style:none; padding:0; margin:0; display:flex; flex-direction:column; gap:.55rem; }
-.exec-attn li { display:flex; gap:.55rem; align-items:flex-start; font-size:.78rem; color:#475569; }
+.exec-attn li { font-size:.78rem; color:#475569; }
+.exec-attn a { display:flex; gap:.55rem; align-items:flex-start; color:inherit; text-decoration:none; cursor:pointer; border-radius:8px; }
 .exec-attn .n { width:18px; height:18px; border-radius:50%; background:#fee2e2; color:#dc2626; font-size:.65rem; font-weight:800; display:flex; align-items:center; justify-content:center; flex-shrink:0; margin-top:1px; }
 .exec-attn strong { color:#0f172a; }
-.exec-charts { display:grid; grid-template-columns:1.05fr 1.35fr 1.15fr; gap:.9rem; margin-bottom:1rem; align-items:stretch; }
+.exec-charts { display:grid; grid-template-columns:0.85fr 1.45fr; gap:.9rem; margin-bottom:1rem; align-items:stretch; }
 .exec-cost-wrap { position:relative; height:180px; max-height:180px; overflow:hidden; }
 .exec-cost-wrap canvas { display:block !important; max-height:180px !important; }
 .exec-donut { display:flex; align-items:center; gap:1rem; }
@@ -72,7 +120,7 @@ $dept_dot = [
 .exec-activity li { display:flex; gap:.65rem; align-items:flex-start; font-size:.78rem; }
 .exec-activity .blob { width:28px; height:28px; border-radius:8px; display:flex; align-items:center; justify-content:center; color:#fff; font-size:.7rem; flex-shrink:0; }
 .exec-activity .when { color:#94a3b8; font-size:.68rem; }
-.exec-bottom { display:grid; grid-template-columns:1.7fr .9fr; gap:.9rem; }
+.exec-bottom { display:grid; grid-template-columns:1fr 1fr; gap:.9rem; align-items:stretch; }
 .exec-table { width:100%; border-collapse:collapse; font-size:.78rem; }
 .exec-table th { text-align:left; color:#94a3b8; font-weight:600; padding:.45rem .4rem; border-bottom:1px solid #f1f5f9; }
 .exec-table td { padding:.7rem .4rem; border-bottom:1px solid #f8fafc; vertical-align:middle; }
@@ -119,64 +167,64 @@ $dept_dot = [
     <?php endif; ?>
 
     <div class="exec-kpis">
-        <div class="exec-kpi blue">
+        <a class="exec-kpi blue" href="<?php echo APP_URL; ?>modules/projects/projects.php">
             <div class="ico"><i class="fas fa-folder"></i></div>
             <div><div class="num"><?php echo number_format($total_projects); ?></div><div class="lbl">Total Projects</div></div>
-        </div>
-        <div class="exec-kpi green">
+        </a>
+        <a class="exec-kpi green" href="<?php echo APP_URL; ?>modules/projects/projects.php">
             <div class="ico"><i class="fas fa-check-circle"></i></div>
             <div><div class="num"><?php echo number_format($active_projects); ?></div><div class="lbl">Active Projects</div></div>
-        </div>
-        <div class="exec-kpi purple">
+        </a>
+        <a class="exec-kpi purple" href="<?php echo APP_URL; ?>modules/projects/projects.php">
             <div class="ico"><i class="fas fa-clipboard-check"></i></div>
             <div><div class="num"><?php echo number_format($completed_projects); ?></div><div class="lbl">Completed Projects</div></div>
-        </div>
-        <div class="exec-kpi orange">
+        </a>
+        <a class="exec-kpi orange" href="<?php echo APP_URL; ?>modules/projects/projects.php">
             <div class="ico"><i class="fas fa-clock"></i></div>
             <div><div class="num"><?php echo number_format($pending_projects); ?></div><div class="lbl">Pending Projects</div></div>
-        </div>
-        <div class="exec-kpi red">
+        </a>
+        <a class="exec-kpi red" href="<?php echo APP_URL; ?>modules/projects/project_reports.php">
             <div class="ico"><i class="fas fa-exclamation-triangle"></i></div>
             <div><div class="num"><?php echo number_format($delayed_projects); ?></div><div class="lbl">Delayed Projects</div></div>
-        </div>
+        </a>
     </div>
 
     <div class="exec-mid">
         <div class="exec-card">
             <h3><i class="fas fa-coins"></i> Financial Overview</h3>
             <div class="exec-fin">
-                <div class="c1"><div class="k">Total Contract Value</div><div class="v" title="₱<?php echo number_format((float)($stats['contract_value'] ?? 0), 2); ?>"><?php echo formatCompactMoney($stats['contract_value'] ?? 0); ?></div></div>
-                <div class="c2"><div class="k">Total Collected</div><div class="v" title="₱<?php echo number_format((float)($stats['collected'] ?? 0), 2); ?>"><?php echo formatCompactMoney($stats['collected'] ?? 0); ?></div></div>
-                <div class="c3"><div class="k">Total Expenses</div><div class="v" title="₱<?php echo number_format((float)($stats['total_project_expenses'] ?? 0), 2); ?>"><?php echo formatCompactMoney($stats['total_project_expenses'] ?? 0); ?></div></div>
-                <div class="c4"><div class="k">Available Funds</div><div class="v" title="₱<?php echo number_format((float)($stats['available_funds'] ?? 0), 2); ?>"><?php echo formatCompactMoney($stats['available_funds'] ?? 0); ?></div></div>
+                <a class="c1" href="<?php echo APP_URL; ?>modules/accounting/financial_reports.php"><div class="k">Total Contract Value</div><div class="v" title="₱<?php echo number_format((float)($stats['contract_value'] ?? 0), 2); ?>"><?php echo formatCompactMoney($stats['contract_value'] ?? 0); ?></div></a>
+                <a class="c2" href="<?php echo APP_URL; ?>modules/accounting/invoices.php"><div class="k">Total Collected</div><div class="v" title="₱<?php echo number_format((float)($stats['collected'] ?? 0), 2); ?>"><?php echo formatCompactMoney($stats['collected'] ?? 0); ?></div></a>
+                <a class="c3" href="<?php echo APP_URL; ?>modules/accounting/expenses.php"><div class="k">Total Expenses<?php echo adjustmentIncludedLabel('accounting'); ?><?php echo adjustmentIncludedLabel('procurement'); ?></div><div class="v" title="₱<?php echo number_format((float)($stats['total_project_expenses'] ?? 0), 2); ?>"><?php echo formatCompactMoney($stats['total_project_expenses'] ?? 0); ?></div></a>
+                <a class="c4" href="<?php echo APP_URL; ?>modules/accounting/funds_budget.php"><div class="k">Available Funds</div><div class="v" title="₱<?php echo number_format((float)($stats['available_funds'] ?? 0), 2); ?>"><?php echo formatCompactMoney($stats['available_funds'] ?? 0); ?></div></a>
             </div>
         </div>
         <div class="exec-card">
             <h3><i class="fas fa-shopping-cart"></i> Procurement Activity</h3>
             <div class="exec-rows">
-                <div class="exec-row"><span><span class="exec-dot" style="background:#f59e0b"></span>Pending Material Requests</span><strong><?php echo number_format((int)($items_needing_attention['pending_material_requests'] ?? 0)); ?></strong></div>
-                <div class="exec-row"><span><span class="exec-dot" style="background:#3b82f6"></span>Pending Purchases</span><strong><?php echo number_format((int)($stats['pending_purchases'] ?? 0)); ?></strong></div>
-                <div class="exec-row"><span><span class="exec-dot" style="background:#8b5cf6"></span>Ongoing Purchases</span><strong><?php echo number_format((int)($stats['pending_pos'] ?? 0)); ?></strong></div>
-                <div class="exec-row"><span><span class="exec-dot" style="background:#22c55e"></span>Completed Purchases</span><strong><?php echo number_format((int)($stats['completed_purchases'] ?? 0)); ?></strong></div>
+                <a class="exec-row" href="<?php echo APP_URL; ?>modules/warehouse/material_requests.php"><span><span class="exec-dot" style="background:#f59e0b"></span>Pending Material Requests</span><strong><?php echo number_format((int)($items_needing_attention['pending_material_requests'] ?? 0)); ?></strong></a>
+                <a class="exec-row" href="<?php echo APP_URL; ?>modules/procurement/purchase_requests.php"><span><span class="exec-dot" style="background:#3b82f6"></span>Pending Purchases</span><strong><?php echo number_format((int)($stats['pending_purchases'] ?? 0)); ?></strong></a>
+                <a class="exec-row" href="<?php echo APP_URL; ?>modules/procurement/purchase_orders.php"><span><span class="exec-dot" style="background:#8b5cf6"></span>Ongoing Purchases</span><strong><?php echo number_format((int)($stats['pending_pos'] ?? 0)); ?></strong></a>
+                <a class="exec-row" href="<?php echo APP_URL; ?>modules/procurement/purchase_orders.php"><span><span class="exec-dot" style="background:#22c55e"></span>Completed Purchases</span><strong><?php echo number_format((int)($stats['completed_purchases'] ?? 0)); ?></strong></a>
             </div>
 
         </div>
         <div class="exec-card">
             <h3><i class="fas fa-warehouse"></i> Warehouse / Inventory Status</h3>
             <div class="exec-rows">
-                <div class="exec-row"><span>Low Stock Items</span><strong><?php echo number_format((int)($stats['low_stock_items'] ?? 0)); ?></strong></div>
-                <div class="exec-row"><span>Total Stock Items</span><strong><?php echo number_format((int)($stats['inventory_items'] ?? 0)); ?></strong></div>
-                <div class="exec-row"><span>Incoming Deliveries</span><strong><?php echo number_format((int)($stats['incoming_deliveries'] ?? 0)); ?></strong></div>
-                <div class="exec-row"><span>Outgoing Requests</span><strong><?php echo number_format((int)($stats['outgoing_requests'] ?? 0)); ?></strong></div>
+                <a class="exec-row" href="<?php echo APP_URL; ?>modules/warehouse/inventory.php"><span>Low Stock Items</span><strong><?php echo number_format((int)($stats['low_stock_items'] ?? 0)); ?></strong></a>
+                <a class="exec-row" href="<?php echo APP_URL; ?>modules/warehouse/inventory.php"><span>Total Stock Items</span><strong><?php echo number_format((int)($stats['inventory_items'] ?? 0)); ?></strong></a>
+                <a class="exec-row" href="<?php echo APP_URL; ?>modules/warehouse/receive_purchases.php"><span>Incoming Deliveries</span><strong><?php echo number_format((int)($stats['incoming_deliveries'] ?? 0)); ?></strong></a>
+                <a class="exec-row" href="<?php echo APP_URL; ?>modules/warehouse/material_requests.php"><span>Outgoing Requests</span><strong><?php echo number_format((int)($stats['outgoing_requests'] ?? 0)); ?></strong></a>
             </div>
         </div>
         <div class="exec-card">
             <h3><i class="fas fa-bell"></i> Items Needing Attention</h3>
             <ol class="exec-attn">
-                <li><span class="n">1</span><div><strong>Unassigned Projects</strong><div><?php echo number_format((int)($items_needing_attention['unassigned_pic'] ?? 0)); ?> project(s) without In-Charge</div></div></li>
-                <li><span class="n">2</span><div><strong>Pending Material Requests</strong><div><?php echo number_format((int)($items_needing_attention['pending_material_requests'] ?? 0)); ?> awaiting warehouse</div></div></li>
-                <li><span class="n">3</span><div><strong>Delayed Deliveries</strong><div><?php echo number_format((int)($stats['delayed_deliveries'] ?? 0)); ?> purchase order(s) overdue</div></div></li>
-                <li><span class="n">4</span><div><strong>Projects with Delayed Progress</strong><div><?php echo number_format((int)($items_needing_attention['overdue_projects'] ?? 0)); ?> past end date</div></div></li>
+                <li><a href="<?php echo APP_URL; ?>modules/accounting/assign_in_charge.php"><span class="n">1</span><div><strong>Unassigned Projects</strong><div><?php echo number_format((int)($items_needing_attention['unassigned_pic'] ?? 0)); ?> project(s) without In-Charge</div></div></a></li>
+                <li><a href="<?php echo APP_URL; ?>modules/warehouse/material_requests.php"><span class="n">2</span><div><strong>Pending Material Requests</strong><div><?php echo number_format((int)($items_needing_attention['pending_material_requests'] ?? 0)); ?> awaiting warehouse</div></div></a></li>
+                <li><a href="<?php echo APP_URL; ?>modules/procurement/purchase_orders.php"><span class="n">3</span><div><strong>Delayed Deliveries</strong><div><?php echo number_format((int)($stats['delayed_deliveries'] ?? 0)); ?> purchase order(s) overdue</div></div></a></li>
+                <li><a href="<?php echo APP_URL; ?>modules/projects/project_reports.php"><span class="n">4</span><div><strong>Projects with Delayed Progress</strong><div><?php echo number_format((int)($items_needing_attention['overdue_projects'] ?? 0)); ?> past end date</div></div></a></li>
             </ol>
         </div>
     </div>
@@ -187,7 +235,7 @@ $dept_dot = [
             <div class="exec-donut">
                 <div class="chart-box">
                     <canvas id="execStatusChart" width="150" height="150"></canvas>
-                    <div class="center"><b><?php echo number_format($total_projects); ?></b><span>Projects</span></div>
+                    <div class="center"><b><?php echo number_format($donut_total); ?></b><span>Projects</span></div>
                 </div>
                 <div class="exec-legend">
                     <?php $i = 0; foreach ($status_counts as $label => $count): ?>
@@ -202,10 +250,24 @@ $dept_dot = [
                 <canvas id="execCostChart"></canvas>
             </div>
         </div>
+    </div>
+
+    <div class="exec-bottom">
+        <div class="exec-card">
+            <h3>Quick Actions</h3>
+            <div class="exec-qa">
+                <a class="t1" href="<?php echo APP_URL; ?>modules/projects/projects.php?action=add"><i class="fas fa-plus"></i>Create Project</a>
+                <a class="t2" href="<?php echo APP_URL; ?>modules/accounting/quotations.php"><i class="fas fa-file-signature"></i>Project Quotation</a>
+                <a class="t3" href="<?php echo APP_URL; ?>modules/projects/projects.php"><i class="fas fa-tasks"></i>Project Monitoring</a>
+                <a class="t4" href="<?php echo APP_URL; ?>modules/admin/department_monitoring.php"><i class="fas fa-eye"></i>Department Status</a>
+                <a class="t5" href="<?php echo APP_URL; ?>modules/admin/consolidated_reports.php"><i class="fas fa-file-alt"></i>Consolidated Reports</a>
+                <a class="t6" href="<?php echo APP_URL; ?>modules/admin/users.php"><i class="fas fa-users-cog"></i>User & Role Management</a>
+            </div>
+        </div>
         <div class="exec-card">
             <h3>Recent Department Activity</h3>
             <?php if (empty($activity_limit)): ?>
-                <p style="color:#94a3b8;font-size:.8rem;">No recent activity yet.</p>
+                <p class="help-text">No recent activity yet.</p>
             <?php else: ?>
             <ul class="exec-activity">
                 <?php foreach ($activity_limit as $activity):
@@ -223,63 +285,6 @@ $dept_dot = [
                 <?php endforeach; ?>
             </ul>
             <?php endif; ?>
-        </div>
-    </div>
-
-    <div class="exec-bottom">
-        <div class="exec-card">
-            <h3>Project List</h3>
-            <?php if (empty($project_overview)): ?>
-                <p style="color:#94a3b8;font-size:.85rem;">No projects yet.</p>
-            <?php else: ?>
-            <div class="table-responsive">
-                <table class="exec-table">
-                    <thead>
-                        <tr>
-                            <th>Project ID</th>
-                            <th>Name</th>
-                            <th>Client</th>
-                            <th>Status</th>
-                            <th>Accounting</th>
-                            <th>Progress</th>
-                            <th>Project In-Charge</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <?php foreach ($project_overview as $project):
-                            $pct = dashboardTimeProgress($project);
-                            $st = $project['status'] ?? 'planning';
-                        ?>
-                        <tr>
-                            <td><strong><?php echo htmlspecialchars(displayDocumentCode($project['project_code'])); ?></strong></td>
-                            <td><?php echo htmlspecialchars($project['name']); ?></td>
-                            <td><?php echo htmlspecialchars($project['client'] ?? $project['location'] ?? '—'); ?></td>
-                            <td><span class="exec-badge <?php echo htmlspecialchars($st); ?>"><?php echo ucfirst(str_replace('_', ' ', $st)); ?></span></td>
-                            <td><?php echo accountingDecisionView(accountingDecisionLabel($project['accounting_status'] ?? '')); ?></td>
-                            <td>
-                                <div class="exec-pbar">
-                                    <div class="track"><span class="fill <?php echo $st === 'completed' ? 'done' : ''; ?>" style="width:<?php echo number_format($pct, 1); ?>%"></span></div>
-                                    <em><?php echo (int) round($pct); ?>%</em>
-                                </div>
-                            </td>
-                            <td><?php echo htmlspecialchars($project['in_charge_name'] ?? 'Unassigned'); ?></td>
-                        </tr>
-                        <?php endforeach; ?>
-                    </tbody>
-                </table>
-            </div>
-            <?php endif; ?>
-        </div>
-        <div class="exec-card">
-            <h3>Quick Actions</h3>
-            <div class="exec-qa">
-                <a class="t1" href="<?php echo APP_URL; ?>modules/projects/projects.php?action=add"><i class="fas fa-plus"></i>Create Project</a>
-                <a class="t2" href="<?php echo APP_URL; ?>modules/accounting/quotations.php"><i class="fas fa-file-signature"></i>Project Quotation</a>
-                <a class="t3" href="<?php echo APP_URL; ?>modules/projects/projects.php"><i class="fas fa-tasks"></i>Project Monitoring</a>
-                <a class="t4" href="<?php echo APP_URL; ?>modules/admin/department_monitoring.php"><i class="fas fa-eye"></i>Department Status</a>
-                <a class="t5" href="<?php echo APP_URL; ?>modules/admin/consolidated_reports.php"><i class="fas fa-file-alt"></i>Consolidated Reports</a>
-                <a class="t6" href="<?php echo APP_URL; ?>modules/admin/users.php"><i class="fas fa-users-cog"></i>User & Role Management</a>
-            </div>
         </div>
     </div>
 </div>
@@ -322,15 +327,15 @@ $dept_dot = [
             options: {
                 responsive: true,
                 maintainAspectRatio: false,
-                plugins: { legend: { position: 'bottom', labels: { boxWidth: 10, font: { size: 11 } } } },
+                plugins: { legend: { position: 'bottom', labels: { boxWidth: 10, font: { size: 13, family: 'Plus Jakarta Sans' } } } },
                 datasets: { bar: { categoryPercentage: 0.55, barPercentage: 0.7 } },
                 scales: {
-                    x: { grid: { display: false } },
+                    x: { grid: { display: false }, ticks: { font: { size: 13, family: 'Plus Jakarta Sans' } } },
                     y: {
                         beginAtZero: true,
                         suggestedMax: 10,
                         grid: { color: '#f1f5f9' },
-                        ticks: { maxTicksLimit: 5, callback: function(v){ return v >= 1000000 ? (v/1000000) + 'M' : (v >= 1000 ? (v/1000) + 'k' : v); } }
+                        ticks: { font: { size: 13, family: 'Plus Jakarta Sans' }, maxTicksLimit: 5, callback: function(v){ return v >= 1000000 ? (v/1000000) + 'M' : (v >= 1000 ? (v/1000) + 'k' : v); } }
                     }
                 }
             }

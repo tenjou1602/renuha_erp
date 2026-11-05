@@ -37,6 +37,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
         $notes = trim($_POST['notes'] ?? '');
         try {
+            $checkedBy = warehouseCheckedByName($_POST['checked_by'] ?? '');
+            ensureWarehouseCheckerColumns($pdo);
+            assertMonthOpen('warehouse', date('Y-m-d'));
             $stmt = $pdo->prepare("
                 SELECT poi.id, poi.material_id, poi.quantity, poi.received_quantity, poi.purchase_order_id,
                        po.po_number, po.status
@@ -56,16 +59,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 (int) $item['material_id'],
                 $remaining,
                 (int) $_SESSION['user_id'],
-                'Received PO ' . $item['po_number'],
+                'Received PO ' . $item['po_number'] . '. Received by ' . $checkedBy . '.',
                 $expiration !== '' ? $expiration : null,
                 $location !== '' ? $location : null,
                 $notes !== '' ? $notes : null
             );
             $pdo->prepare("UPDATE purchase_order_items SET received_quantity = quantity WHERE id = ?")->execute([$item_id]);
+            $pdo->prepare("UPDATE purchase_orders SET received_by_name = ? WHERE id = ?")->execute([$checkedBy, (int) $item['purchase_order_id']]);
             $open = $pdo->prepare("SELECT COUNT(*) FROM purchase_order_items WHERE purchase_order_id = ? AND received_quantity < quantity");
             $open->execute([(int) $item['purchase_order_id']]);
             if ((int) $open->fetchColumn() === 0) {
-                $pdo->prepare("UPDATE purchase_orders SET status = 'delivered', received_at = NOW() WHERE id = ?")->execute([(int) $item['purchase_order_id']]);
+                $pdo->prepare("UPDATE purchase_orders SET status = 'delivered', received_at = NOW(), received_by_name = ? WHERE id = ?")->execute([$checkedBy, (int) $item['purchase_order_id']]);
             }
             $pdo->commit();
             try {
@@ -74,8 +78,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             } catch (Throwable $syncError) {
                 error_log('[Runeha ERP] sync received orders for release: ' . $syncError->getMessage());
             }
-            logActivity($_SESSION['user_id'], 'Received stock', 'Warehouse', $item['po_number'] . ' batch ' . $batch . ' qty ' . $remaining);
-            $_SESSION['success'] = 'Received ' . number_format($remaining) . '. Batch ' . $batch . ' (FIFO). Expiration is optional.';
+            logActivity($_SESSION['user_id'], 'Received stock', 'Warehouse', $item['po_number'] . ' batch ' . $batch . ' qty ' . $remaining . ' Received by ' . $checkedBy);
+            $_SESSION['success'] = 'Received ' . number_format($remaining) . '. Batch ' . $batch . ' (FIFO). Received by ' . $checkedBy . '.';
             header('Location: stock.php?action=in');
             exit();
         } catch (Throwable $e) {
@@ -105,6 +109,22 @@ try {
     ")->fetchAll();
 } catch (PDOException $e) {
     $incoming_lines = [];
+}
+$stock_ins = [];
+try {
+    $stock_ins = $pdo->query("
+        SELECT sm.quantity, sm.batch_number, sm.reason, sm.created_at,
+               m.material_code, m.name AS material_name, m.unit,
+               ws.location
+        FROM stock_movements sm
+        LEFT JOIN materials m ON m.id = sm.material_id
+        LEFT JOIN warehouse_stock ws ON ws.material_id = sm.material_id AND ws.batch_number = sm.batch_number
+        WHERE sm.movement_type = 'in'
+        ORDER BY sm.created_at DESC, sm.id DESC
+        LIMIT 50
+    ")->fetchAll();
+} catch (PDOException $e) {
+    $stock_ins = [];
 }
 $site_releases = [];
 try {
@@ -184,8 +204,9 @@ include '../../includes/header.php';
         <?php $batchPreview = 1; ?>
         <?php foreach ($incoming_lines as $line): ?>
             <?php $remaining = (int) $line['quantity'] - (int) $line['received_quantity']; ?>
-            <form method="POST" style="border-top:1px solid #e2e8f0;padding-top:1rem;margin-top:1rem;">
+            <form method="POST" style="border-top:1px solid #e2e8f0;padding-top:1rem;margin-top:1rem;" onsubmit="return askCheckedBy(this, 'Receive by — who checked this item?');">
                 <input type="hidden" name="receive_po_line" value="1">
+                <input type="hidden" name="checked_by" value="">
                 <input type="hidden" name="item_id" value="<?php echo (int) $line['id']; ?>">
                 <p><strong><?php echo htmlspecialchars($line['po_number']); ?></strong>
                     <?php if (!empty($line['project_code'])): ?> · <?php echo htmlspecialchars($line['project_code'] . ' ' . $line['project_name']); ?><?php endif; ?>
@@ -226,6 +247,46 @@ include '../../includes/header.php';
             <?php $batchPreview++; ?>
         <?php endforeach; ?>
     <?php endif; ?>
+    <h3 style="margin-top:1.5rem;"><i class="fas fa-arrow-down"></i> Stocked in</h3>
+    <p style="color:#64748b;">Materials received in Receiving are stocked in automatically and listed here.</p>
+    <?php if (!$stock_ins): ?>
+        <p style="color:#94a3b8;">No stock-in yet.</p>
+    <?php else: ?>
+        <div class="table-responsive">
+            <table class="table">
+                <thead><tr><th>Material</th><th>Qty</th><th>Location</th><th>FIFO batch</th><th>Received By</th><th>When</th></tr></thead>
+                <tbody>
+                    <?php foreach ($stock_ins as $inbound): ?>
+                    <tr>
+                        <td><?php echo htmlspecialchars(trim(($inbound['material_code'] ?? '') . ' ' . ($inbound['material_name'] ?? ''))); ?></td>
+                        <td><?php echo number_format((int) $inbound['quantity']); ?> <?php echo htmlspecialchars($inbound['unit'] ?? ''); ?></td>
+                        <td><?php echo htmlspecialchars($inbound['location'] ?? '') !== '' ? htmlspecialchars($inbound['location']) : '—'; ?></td>
+                        <td><?php echo htmlspecialchars($inbound['batch_number'] ?? '—'); ?></td>
+                        <td><?php
+                            $receivedName = '';
+                            if (preg_match('/Received by (.+?)\.?$/', (string) ($inbound['reason'] ?? ''), $receivedMatch)) {
+                                $receivedName = trim($receivedMatch[1]);
+                            }
+                            $poNote = '';
+                            if (preg_match('/Received PO\s+(\S+)/', (string) ($inbound['reason'] ?? ''), $poMatch)) {
+                                $poNote = rtrim($poMatch[1], '.');
+                            }
+                            if ($receivedName !== '') {
+                                echo 'Received by ' . htmlspecialchars($receivedName);
+                                if ($poNote !== '') {
+                                    echo '<div style="color:#64748b;font-size:0.8rem;">' . htmlspecialchars($poNote) . '</div>';
+                                }
+                            } else {
+                                echo htmlspecialchars($inbound['reason'] ?? '—');
+                            }
+                        ?></td>
+                        <td><?php echo date('M d, Y h:i A', strtotime($inbound['created_at'])); ?></td>
+                    </tr>
+                    <?php endforeach; ?>
+                </tbody>
+            </table>
+        </div>
+    <?php endif; ?>
 </div>
 <?php endif; ?>
 
@@ -238,7 +299,7 @@ include '../../includes/header.php';
     <?php else: ?>
         <div class="table-responsive">
             <table class="table">
-                <thead><tr><th>Project</th><th>Location</th><th>Material</th><th>Qty</th><th>FIFO batch</th><th>When</th></tr></thead>
+                <thead><tr><th>Project</th><th>Location</th><th>Material</th><th>Qty</th><th>FIFO batch</th><th>Released By</th><th>When</th></tr></thead>
                 <tbody>
                     <?php foreach ($site_releases as $release): ?>
                     <tr>
@@ -247,6 +308,13 @@ include '../../includes/header.php';
                         <td><?php echo htmlspecialchars(trim(($release['material_code'] ?? '') . ' ' . ($release['material_name'] ?? ''))); ?></td>
                         <td><?php echo number_format((int) $release['quantity']); ?> <?php echo htmlspecialchars($release['unit'] ?? ''); ?></td>
                         <td><?php echo htmlspecialchars($release['batch_number'] ?? '—'); ?></td>
+                        <td><?php
+                            $releasedName = '';
+                            if (preg_match('/Released by (.+?)\.?$/', (string) ($release['reason'] ?? ''), $releasedMatch)) {
+                                $releasedName = trim($releasedMatch[1]);
+                            }
+                            echo $releasedName !== '' ? 'Released by ' . htmlspecialchars($releasedName) : '—';
+                        ?></td>
                         <td><?php echo date('M d, Y h:i A', strtotime($release['created_at'])); ?></td>
                     </tr>
                     <?php endforeach; ?>
@@ -315,4 +383,23 @@ document.getElementById(<?php echo json_encode($stock_action === 'out' ? 'stock-
 </script>
 <?php endif; ?>
 
+<script>
+function askCheckedBy(form, label) {
+    const entered = window.prompt(label);
+    if (entered === null) {
+        return false;
+    }
+    const name = entered.trim();
+    if (!name) {
+        window.alert('Enter the employee who checked the item.');
+        return false;
+    }
+    const field = form.querySelector('input[name="checked_by"]');
+    if (!field) {
+        return false;
+    }
+    field.value = name;
+    return true;
+}
+</script>
 <?php include '../../includes/footer.php'; ?>

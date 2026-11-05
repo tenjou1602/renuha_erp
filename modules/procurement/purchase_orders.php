@@ -2,12 +2,37 @@
 require_once '../../config/database.php';
 require_once '../../includes/auth.php';
 require_once '../../includes/mailer.php';
+require_once '../../includes/warehouse_release.php';
 
 requireDepartment(['procurement']);
+
+try {
+    connectUnlinkedProcurementMaterialRequests($pdo);
+} catch (Throwable $e) {
+    error_log('[Runeha ERP] connect warehouse material requests: ' . $e->getMessage());
+}
 
 $page_title = 'Purchase Orders';
 $action = $_GET['action'] ?? 'list';
 $id = (int)($_GET['id'] ?? 0);
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['send_to_warehouse'])) {
+    $poId = (int) ($_POST['po_id'] ?? 0);
+    if (!canMarkReadyForWarehouse()) {
+        $_SESSION['error'] = 'You cannot send this order to Warehouse.';
+    } else {
+        try {
+            $sendError = sendPurchaseOrderToWarehouse($poId);
+            $_SESSION[$sendError === '' ? 'success' : 'error'] = $sendError === ''
+                ? 'The order has been sent to the Warehouse. They will receive it on Receiving. You are still in Procurement.'
+                : $sendError;
+        } catch (PDOException $e) {
+            $_SESSION['error'] = userDatabaseError($e, 'Procurement');
+        }
+    }
+    header('Location: purchase_orders.php?action=view&id=' . $poId);
+    exit();
+}
 
 function generatePONumber() {
     return generateNumber('PO', 'purchase_orders', 'po_number');
@@ -15,34 +40,20 @@ function generatePONumber() {
 
 function savePurchaseOrderItems(PDO $pdo, int $orderId, int $requestId): float
 {
-    $quote = $pdo->prepare("SELECT id FROM quotations WHERE purchase_request_id = ? AND status = 'accepted' ORDER BY id DESC LIMIT 1");
-    $quote->execute([$requestId]);
-    $quoteId = (int) $quote->fetchColumn();
-    $prices = [];
-    if ($quoteId > 0) {
-        $priceStmt = $pdo->prepare("SELECT purchase_request_item_id, unit_price FROM quotation_items WHERE quotation_id = ?");
-        $priceStmt->execute([$quoteId]);
-        foreach ($priceStmt->fetchAll() as $row) {
-            $prices[(int) $row['purchase_request_item_id']] = (float) $row['unit_price'];
-        }
-    }
-    $items = $pdo->prepare("SELECT id, material_id, quantity FROM purchase_request_items WHERE purchase_request_id = ?");
+    $items = $pdo->prepare("SELECT id, material_id, quantity, estimated_cost FROM purchase_request_items WHERE purchase_request_id = ?");
     $items->execute([$requestId]);
     $rows = $items->fetchAll();
     if (!$rows) {
         throw new RuntimeException('This purchase request has no materials.');
     }
-    foreach ($rows as $item) {
-        $unitPrice = $prices[(int) $item['id']] ?? 0;
-        if ($unitPrice <= 0) {
-            throw new RuntimeException('Enter the supplier unit price for every material in the price comparison first.');
-        }
-    }
     $pdo->prepare("DELETE FROM purchase_order_items WHERE purchase_order_id = ?")->execute([$orderId]);
     $insert = $pdo->prepare("INSERT INTO purchase_order_items (purchase_order_id, material_id, quantity, unit_price) VALUES (?, ?, ?, ?)");
     $total = 0.0;
     foreach ($rows as $item) {
-        $unitPrice = $prices[(int) $item['id']];
+        $unitPrice = round((float) $item['estimated_cost'], 2);
+        if ($unitPrice < 0) {
+            throw new RuntimeException('The Excel price cannot be changed.');
+        }
         $total += round((float) $item['quantity'] * $unitPrice, 2);
         $insert->execute([$orderId, $item['material_id'], $item['quantity'], $unitPrice]);
     }
@@ -66,7 +77,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $order_date = $_POST['order_date'] ?? date('Y-m-d');
         $delivery_date = trim((string) ($_POST['delivery_date'] ?? ''));
         $delivery_date = $delivery_date !== '' ? $delivery_date : null;
-        $payment_terms = trim($_POST['payment_terms'] ?? '');
+        $payment_terms = isset($_POST['add_order']) ? 'Cash' : trim($_POST['payment_terms'] ?? '');
         $status = $_POST['status'] ?? 'draft';
         $previousStatus = null;
         if (isset($_POST['add_order'])) {
@@ -99,9 +110,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $accepted = $pdo->prepare("SELECT supplier, supplier_contact FROM quotations WHERE purchase_request_id = ? AND status = 'accepted' ORDER BY id DESC LIMIT 1");
             $accepted->execute([$purchase_request_id]);
             $acceptedQuote = $accepted->fetch();
-            if (!$acceptedQuote) {
-                $errors[] = 'Accept one supplier price before creating the purchase order.';
-            } else {
+            if ($acceptedQuote) {
                 $supplier = trim((string) $acceptedQuote['supplier']);
                 $supplier_contact = trim((string) ($acceptedQuote['supplier_contact'] ?? ''));
                 if ($supplier_contact === '' || strcasecmp($supplier_contact, $supplier) === 0) {
@@ -115,10 +124,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($supplier === '') {
             $errors[] = 'Supplier is required.';
         }
+        if ($delivery_date !== null && (!preg_match('/^\d{4}-\d{2}-\d{2}$/', (string) $order_date) || !preg_match('/^\d{4}-\d{2}-\d{2}$/', $delivery_date) || $delivery_date <= $order_date)) {
+            $errors[] = 'Delivery date must be after the order date.';
+        }
         
         if (empty($errors)) {
             $expenseId = 0;
             try {
+                assertMonthOpen('procurement', $order_date);
                 $pdo->beginTransaction();
                 if (isset($_POST['add_order'])) {
                     $stmt = $pdo->prepare("INSERT INTO purchase_orders (po_number, purchase_request_id, project_id, supplier, supplier_contact, order_date, delivery_date, payment_terms, total_amount, status, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)");
@@ -135,6 +148,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     
                     $expenseId = queuePurchaseOrderForAccounting($pdo, $orderId, (int) $_SESSION['user_id']);
                     logActivity($_SESSION['user_id'], 'Created purchase order', 'Procurement', "PO: $po_number");
+                    writeAudit('Create purchase order', 'Procurement', 'purchase_orders', $orderId, null, ['po_number' => $po_number, 'total' => $poTotal, 'status' => $status], null);
                     $_SESSION['success'] = $po_number . ' was sent to Accounting for ₱' . number_format($poTotal, 2) . '. Warehouse can receive the materials after Accounting marks them paid.';
                 } else {
                     $stmt = $pdo->prepare("UPDATE purchase_orders SET purchase_request_id = ?, project_id = ?, supplier = ?, supplier_contact = ?, order_date = ?, delivery_date = ?, payment_terms = ?, status = ? WHERE id = ?");
@@ -190,30 +204,33 @@ if (isset($_POST['mark_ready_warehouse'])) {
 
 // Approved, confirmed, and ordered requests can be linked to a purchase order.
 $purchase_requests = $pdo->query("
-    SELECT pr.*, u.full_name as requestor_name, q.id AS accepted_quote_id, q.supplier AS quote_supplier, q.supplier_contact AS quote_contact, q.total_amount AS quote_total
+    SELECT pr.*, u.full_name as requestor_name, q.id AS accepted_quote_id,
+           COALESCE(NULLIF(q.supplier, ''), s.name) AS quote_supplier,
+           COALESCE(NULLIF(q.supplier_contact, ''), NULLIF(s.company_name, '')) AS quote_contact,
+           q.total_amount AS quote_total
     FROM purchase_requests pr
-    INNER JOIN quotations q ON q.purchase_request_id = pr.id AND q.status = 'accepted'
     LEFT JOIN users u ON pr.requestor_id = u.id
+    LEFT JOIN quotations q ON q.id = (
+        SELECT MAX(q2.id) FROM quotations q2
+        WHERE q2.purchase_request_id = pr.id AND q2.status = 'accepted'
+    )
+    LEFT JOIN procurement_supplier_choice psc ON psc.purchase_request_id = pr.id
+    LEFT JOIN suppliers s ON s.id = psc.supplier_id
     WHERE pr.status IN ('approved', 'confirmed', 'ordered')
-      AND q.id = (SELECT MAX(q2.id) FROM quotations q2 WHERE q2.purchase_request_id = pr.id AND q2.status = 'accepted')
+      AND EXISTS (SELECT 1 FROM purchase_request_items pri WHERE pri.purchase_request_id = pr.id)
     ORDER BY pr.created_at DESC
 ")->fetchAll();
 $pr_items = [];
 try {
-    $itemRows = $pdo->query("SELECT pri.purchase_request_id, pri.quantity, pri.unit, qi.unit_price AS supplier_price, m.name AS material_name
+    $itemRows = $pdo->query("SELECT pri.purchase_request_id, pri.quantity, pri.unit, pri.estimated_cost, m.name AS material_name
         FROM purchase_request_items pri
-        LEFT JOIN materials m ON m.id = pri.material_id
-        LEFT JOIN quotations q ON q.id = (
-            SELECT MAX(q2.id) FROM quotations q2
-            WHERE q2.purchase_request_id = pri.purchase_request_id AND q2.status = 'accepted'
-        )
-        LEFT JOIN quotation_items qi ON qi.quotation_id = q.id AND qi.purchase_request_item_id = pri.id")->fetchAll();
+        LEFT JOIN materials m ON m.id = pri.material_id")->fetchAll();
     foreach ($itemRows as $itemRow) {
         $pr_items[(int) $itemRow['purchase_request_id']][] = [
             'name' => $itemRow['material_name'] ?: 'Material',
             'quantity' => (int) $itemRow['quantity'],
             'unit' => $itemRow['unit'],
-            'price' => $itemRow['supplier_price'] === null ? null : (float) $itemRow['supplier_price'],
+            'price' => round((float) $itemRow['estimated_cost'], 2),
         ];
     }
 } catch (PDOException $e) {
@@ -271,12 +288,17 @@ if ($prefill_pr > 0) {
     }
     if (!$alreadyListed) {
         $extra = $pdo->prepare("
-            SELECT pr.*, u.full_name as requestor_name, q.id AS accepted_quote_id, q.supplier AS quote_supplier, q.supplier_contact AS quote_contact, q.total_amount AS quote_total
+            SELECT pr.*, u.full_name as requestor_name, q.id AS accepted_quote_id,
+                   COALESCE(NULLIF(q.supplier, ''), s.name) AS quote_supplier,
+                   COALESCE(NULLIF(q.supplier_contact, ''), NULLIF(s.company_name, '')) AS quote_contact,
+                   q.total_amount AS quote_total
             FROM purchase_requests pr
             LEFT JOIN users u ON pr.requestor_id = u.id
             LEFT JOIN quotations q ON q.id = (
                 SELECT MAX(q2.id) FROM quotations q2 WHERE q2.purchase_request_id = pr.id AND q2.status = 'accepted'
             )
+            LEFT JOIN procurement_supplier_choice psc ON psc.purchase_request_id = pr.id
+            LEFT JOIN suppliers s ON s.id = psc.supplier_id
             WHERE pr.id = ?
         ");
         $extra->execute([$prefill_pr]);
@@ -302,9 +324,18 @@ if ($prefill_pr > 0) {
     }
 }
 if ($action === 'add' && (int) ($_GET['quote'] ?? 0) > 0) {
-    $quote_stmt = $pdo->prepare("SELECT supplier, supplier_contact, purchase_request_id FROM quotations WHERE id = ? AND status = 'accepted'");
+    $quote_stmt = $pdo->prepare("SELECT supplier, supplier_contact, purchase_request_id, submitted_to_accounting_at FROM quotations WHERE id = ? AND status = 'accepted'");
     $quote_stmt->execute([(int) $_GET['quote']]);
     $linked_quote = $quote_stmt->fetch();
+    if ($linked_quote && !empty($linked_quote['submitted_to_accounting_at']) && (int) ($linked_quote['purchase_request_id'] ?? 0) > 0) {
+        $paidStmt = $pdo->prepare("SELECT e.status FROM purchase_orders po INNER JOIN expenses e ON e.purchase_order_id = po.id WHERE po.purchase_request_id = ? AND po.status <> 'cancelled' ORDER BY e.id DESC LIMIT 1");
+        $paidStmt->execute([(int) $linked_quote['purchase_request_id']]);
+        if ((string) $paidStmt->fetchColumn() === 'paid') {
+            $_SESSION['error'] = 'This quotation is paid. It can only be viewed.';
+            header('Location: quotations.php?action=view&id=' . (int) $_GET['quote']);
+            exit();
+        }
+    }
     if ($linked_quote) {
         $prefill_supplier = $linked_quote['supplier'];
         $prefill_contact = $linked_quote['supplier_contact'] ?? '';
@@ -332,6 +363,9 @@ include '../../includes/header.php';
 
 <?php if (isset($_SESSION['success'])): ?>
     <div class="alert alert-success"><?php echo htmlspecialchars($_SESSION['success']); unset($_SESSION['success']); ?></div>
+<?php endif; ?>
+<?php if (isset($_SESSION['error'])): ?>
+    <div class="alert alert-danger"><?php echo htmlspecialchars($_SESSION['error']); unset($_SESSION['error']); ?></div>
 <?php endif; ?>
 <?php if (isset($error)): ?>
     <div class="alert alert-danger"><?php echo htmlspecialchars($error); ?></div>
@@ -363,7 +397,7 @@ include '../../includes/header.php';
                 <select name="purchase_request_id" id="poRequest" required>
                     <option value="">Select purchase request</option>
                     <?php if (!$purchase_requests): ?>
-                        <option value="" disabled>No request has an accepted supplier yet</option>
+                        <option value="" disabled>No approved request is ready for an order</option>
                     <?php endif; ?>
                     <?php foreach ($purchase_requests as $pr): ?>
                         <option value="<?php echo $pr['id']; ?>"
@@ -388,25 +422,23 @@ include '../../includes/header.php';
         <div class="form-row">
             <div class="form-group">
                 <label class="required">Supplier</label>
-                <input type="text" name="supplier" id="supplierName" readonly value="<?php echo htmlspecialchars($prefill_supplier); ?>" placeholder="From the accepted supplier" style="background:#f8fafc;">
+                <input type="text" name="supplier" id="supplierName" required value="<?php echo htmlspecialchars($prefill_supplier); ?>" placeholder="Supplier name">
             </div>
             <div class="form-group">
                 <label>Company Name</label>
-                <input type="text" name="supplier_contact" id="supplierContact" readonly value="<?php echo htmlspecialchars($prefill_contact); ?>" style="background:#f8fafc;">
+                <input type="text" name="supplier_contact" id="supplierContact" value="<?php echo htmlspecialchars($prefill_contact); ?>">
             </div>
         </div>
-        <?php if ($prefill_pr > 0 && $prefill_supplier === ''): ?>
-            <p style="color:#b45309;">No supplier has been accepted in the price comparison for this request. Accept a supplier there before saving the order.</p>
-        <?php endif; ?>
+        <p style="color:#64748b;">Materials, quantity, and price stay the Excel values. Supplier and company name come from the supplier chosen for this request.</p>
         
         <div class="form-row">
             <div class="form-group">
                 <label>Order Date</label>
-                <input type="date" name="order_date" value="<?php echo $order_details['order_date'] ?? date('Y-m-d'); ?>">
+                <input type="date" name="order_date" id="poOrderDate" value="<?php echo $order_details['order_date'] ?? date('Y-m-d'); ?>">
             </div>
             <div class="form-group">
                 <label>Delivery Date</label>
-                <input type="date" name="delivery_date" value="<?php echo $order_details['delivery_date'] ?? ''; ?>">
+                <input type="date" name="delivery_date" id="poDeliveryDate" value="<?php echo $order_details['delivery_date'] ?? ''; ?>">
             </div>
             <div class="form-group">
                 <label>Status</label>
@@ -436,7 +468,7 @@ include '../../includes/header.php';
         
         <div class="form-group">
             <label>Payment Terms</label>
-            <input type="text" name="payment_terms" value="<?php echo htmlspecialchars($order_details['payment_terms'] ?? ''); ?>" placeholder="e.g., Net 30, COD">
+            <input type="text" name="payment_terms" value="<?php echo htmlspecialchars(($action ?? '') === 'add' ? 'Cash' : ($order_details['payment_terms'] ?? 'Cash')); ?>" readonly>
         </div>
 
         <h4 style="margin:1rem 0 0.5rem;">Materials on this PO number</h4>
@@ -525,6 +557,31 @@ function renderPoItems() {
 }
 document.getElementById('poRequest')?.addEventListener('change', renderPoItems);
 renderPoItems();
+(function () {
+    var orderDate = document.getElementById('poOrderDate');
+    var deliveryDate = document.getElementById('poDeliveryDate');
+    if (!orderDate || !deliveryDate) return;
+    function dayAfter(value) {
+        var parts = String(value || '').split('-');
+        if (parts.length !== 3) return '';
+        var date = new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]));
+        if (isNaN(date.getTime())) return '';
+        date.setDate(date.getDate() + 1);
+        var month = String(date.getMonth() + 1).padStart(2, '0');
+        var day = String(date.getDate()).padStart(2, '0');
+        return date.getFullYear() + '-' + month + '-' + day;
+    }
+    function syncDelivery() {
+        var next = dayAfter(orderDate.value);
+        if (!next) return;
+        deliveryDate.min = next;
+        if (deliveryDate.value && deliveryDate.value < next) {
+            deliveryDate.value = '';
+        }
+    }
+    orderDate.addEventListener('change', syncDelivery);
+    syncDelivery();
+})();
 </script>
 
 <?php elseif ($action === 'view' && $order_details): ?>
@@ -583,13 +640,20 @@ renderPoItems();
         <a href="?action=edit&id=<?php echo $order_details['id']; ?>" class="btn btn-warning"><i class="fas fa-edit"></i> Edit</a>
         <?php endif; ?>
         <?php if ($order_details['status'] === 'ready_for_warehouse'): ?>
-            <a href="<?php echo APP_URL; ?>modules/warehouse/receive_purchases.php?po=<?php echo (int) $order_details['id']; ?>" class="btn btn-primary"><i class="fas fa-truck-loading"></i> Receive in Warehouse</a>
+            <span class="badge badge-info">Sent to Warehouse</span>
+        <?php elseif (in_array($order_details['status'], ['sent', 'confirmed'], true) && canMarkReadyForWarehouse()): ?>
+            <form method="POST" style="display:inline;">
+                <input type="hidden" name="send_to_warehouse" value="1">
+                <input type="hidden" name="po_id" value="<?php echo (int) $order_details['id']; ?>">
+                <button class="btn btn-primary" type="submit"><i class="fas fa-truck-loading"></i> Send to Warehouse</button>
+            </form>
         <?php elseif (in_array($order_details['status'], ['sent', 'confirmed'], true)): ?>
             <span class="badge badge-warning">Waiting for Accounting payment</span>
         <?php endif; ?>
         <?php if ($order_details['status'] === 'delivered'): ?>
             <a href="purchased_materials.php" class="btn btn-primary"><i class="fas fa-boxes"></i> Purchased Materials</a>
         <?php endif; ?>
+        <a class="btn btn-outline" href="purchase_order_print.php?id=<?php echo (int) $order_details['id']; ?>">Print / PDF</a>
         <a href="purchase_orders.php" class="btn btn-secondary"><i class="fas fa-arrow-left"></i> Back</a>
     </div>
 </div>
@@ -629,6 +693,7 @@ renderPoItems();
                         <td><?php echo date('M d, Y', strtotime($order['created_at'])); ?></td>
                         <td>
                             <a href="?action=view&id=<?php echo $order['id']; ?>" class="btn btn-sm btn-info"><i class="fas fa-eye"></i></a>
+                            <a href="purchase_order_print.php?id=<?php echo (int) $order['id']; ?>" class="btn btn-sm btn-outline" title="Print / PDF"><i class="fas fa-file-pdf"></i></a>
                             <?php if (canWriteDepartmentData('procurement') && !in_array($order['status'], ['ready_for_warehouse', 'delivered'], true)): ?>
                             <a href="?action=edit&id=<?php echo $order['id']; ?>" class="btn btn-sm btn-warning"><i class="fas fa-edit"></i></a>
                             <?php endif; ?>

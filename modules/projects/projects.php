@@ -5,7 +5,7 @@ require_once '../../includes/quotation_file.php';
 
 requireDepartment(['engineering']);
 
-$page_title = (($_GET['action'] ?? 'list') === 'add') ? 'Create Project' : 'Project Status';
+$page_title = (($_GET['action'] ?? 'list') === 'add') ? 'Create Project' : 'Project List';
 $action = $_GET['action'] ?? 'list';
 $id = (int)($_GET['id'] ?? 0);
 
@@ -24,7 +24,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
         exit();
     }
-    if ((isset($_POST['add_project']) || isset($_POST['update_project'])) && !canSaveProjectRecord()) {
+    if (isset($_POST['update_project'])) {
+        $_SESSION['error'] = 'Projects cannot be edited after they are created.';
+        header('Location: projects.php');
+        exit();
+    }
+    if (isset($_POST['add_project']) && !canSaveProjectRecord()) {
         $_SESSION['error'] = 'You cannot save project records.';
         header('Location: projects.php');
         exit();
@@ -42,10 +47,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $client = trim($_POST['client'] ?? '');
         $subject = trim($_POST['subject'] ?? '');
         $start_date = nullableDate($_POST['start_date'] ?? '');
-        $end_date = nullableDate($_POST['end_date'] ?? '');
-        $status = $_POST['status'] ?? 'planning';
+        $end_date = null;
         $estimated_budget = (float)($_POST['estimated_budget'] ?? 0);
         $assigned_to = (int)($_POST['assigned_to'] ?? 0) ?: null;
+        $status = $assigned_to ? 'assigned' : 'planning';
         $source = trim($_POST['project_source'] ?? '');
         $source_quotation_id = null;
         $source_contract_id = null;
@@ -86,15 +91,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if (empty($name)) $errors[] = 'Project name is required.';
         if ($estimated_budget <= 0) $errors[] = 'Estimated budget must be greater than 0.';
         $raw_start = trim((string) ($_POST['start_date'] ?? ''));
-        $raw_end = trim((string) ($_POST['end_date'] ?? ''));
         if ($raw_start === '' || $start_date === null) {
             $errors[] = 'Start date is required and must be a real calendar date (YYYY-MM-DD).';
         }
-        if ($raw_end === '' || $end_date === null) {
-            $errors[] = 'End date is required and must be a real calendar date (YYYY-MM-DD).';
+        if (isset($_POST['add_project'])) {
+            $today = date('Y-m-d');
+            if ($start_date !== null && $start_date < $today) {
+                $errors[] = 'Start date cannot be before today. Past dates are closed.';
+            }
         }
-        if ($start_date !== null && $end_date !== null && $end_date < $start_date) {
-            $errors[] = 'End date must be on or after the start date.';
+        $stageBlock = projectStageBlocker($pdo, $status, $assigned_to, isset($_POST['update_project']) ? (int) $id : 0);
+        if ($stageBlock) {
+            $errors[] = $stageBlock;
         }
         if ($status === 'completed') {
             $alreadyCompleted = false;
@@ -120,6 +128,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $dupCode = $dup->fetchColumn();
             if ($dupCode) {
                 $errors[] = 'This quotation was already used for project ' . $dupCode . '.';
+            }
+        }
+        if (isset($_POST['add_project']) && $name !== '') {
+            $dupData = $pdo->prepare("SELECT project_code FROM projects WHERE LOWER(TRIM(name)) = LOWER(TRIM(?)) AND LOWER(TRIM(COALESCE(client, ''))) = LOWER(TRIM(?)) AND LOWER(TRIM(COALESCE(location, ''))) = LOWER(TRIM(?)) LIMIT 1");
+            $dupData->execute([$name, $client, $location]);
+            $dupDataCode = $dupData->fetchColumn();
+            if ($dupDataCode) {
+                $errors[] = 'This project data was already processed as ' . $dupDataCode . '. The same project cannot be created again.';
             }
         }
         if (isset($_POST['add_project'])) {
@@ -193,9 +209,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         }
                     }
                     $pdo->commit();
+                    syncProjectBudgetFunds($pdo, $new_project_id);
                     
                     logActivity($_SESSION['user_id'], 'Created project', 'Projects', "Project: $project_code");
                     notify('accounting', 'project_created', 'New project', 'New project ' . $project_code . ' is waiting in Received Projects.', 'modules/accounting/received_projects.php', $new_project_id, 'project', $new_project_id);
+                    notify('engineering', 'project_created', 'New project', 'New project ' . $project_code . ' is waiting in Received Projects.', 'modules/projects/received_projects.php', $new_project_id, 'project', $new_project_id);
+                    require_once '../../includes/mailer.php';
+                    notifyProjectArrived($new_project_id);
                     if ((int) $assigned_to > 0) {
                         notify((int) $assigned_to, 'pic_assigned', 'Project assignment', 'You have been assigned to ' . $project_code . '.', 'modules/projects/project_details.php?id=' . $new_project_id, $new_project_id, 'project', $new_project_id);
                     }
@@ -209,6 +229,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $prevPic = (int) $prevStmt->fetchColumn();
                     $stmt = $pdo->prepare("UPDATE projects SET name = ?, description = ?, location = ?, client = ?, subject = ?, start_date = ?, end_date = ?, status = ?, estimated_budget = ?, assigned_to = ?, in_charge_id = ? WHERE id = ?");
                     $stmt->execute([$name, $description, $location, $client, $subject, $start_date, $end_date, $status, $estimated_budget, $assigned_to, $assigned_to, $id]);
+                    syncProjectBudgetFunds($pdo, (int) $id);
                     if ((int) $assigned_to > 0 && (int) $assigned_to !== $prevPic) {
                         notify((int) $assigned_to, 'pic_assigned', 'Project assignment', 'You have been assigned to ' . $project_code . '.', 'modules/projects/project_details.php?id=' . $id, $id, 'project', $id);
                     }
@@ -369,9 +390,34 @@ if (isset($_GET['delete_id']) && $action === 'delete') {
     }
 }
 
-// Get projects - FIXED: Removed archived column reference
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['archive_project'])) {
+    if (!canEncodeApprovedProject()) {
+        $_SESSION['error'] = 'Only Executive Admin can archive a project.';
+        header('Location: projects.php');
+        exit();
+    }
+    $archiveId = (int) ($_POST['project_id'] ?? 0);
+    $pdo->prepare("UPDATE projects SET archived_at = NOW() WHERE id = ? AND archived_at IS NULL")->execute([$archiveId]);
+    logActivity($_SESSION['user_id'], 'Archived project', 'Projects', 'Project ID: ' . $archiveId);
+    $_SESSION['success'] = 'Project archived. It stays in the database and is hidden from the active list.';
+    header('Location: projects.php');
+    exit();
+}
+
+$sortMap = ['code' => 'p.project_code', 'name' => 'p.name', 'client' => 'p.client', 'status' => 'p.status', 'budget' => 'p.estimated_budget', 'created' => 'p.created_at'];
+$sort = $sortMap[$_GET['sort'] ?? 'created'] ?? 'p.created_at';
+$dir = (($_GET['dir'] ?? 'desc') === 'asc') ? 'ASC' : 'DESC';
+$pageNo = max(1, (int) ($_GET['page'] ?? 1));
+$perPage = 20;
 $projects = [];
+$projectTotal = 0;
 try {
+    $where = ['p.archived_at IS NULL'];
+    $params = [];
+    $sqlWhere = 'WHERE ' . implode(' AND ', $where);
+    $count = $pdo->prepare("SELECT COUNT(*) FROM projects p $sqlWhere");
+    $count->execute($params);
+    $projectTotal = (int) $count->fetchColumn();
     $query = "SELECT p.*, vpc.actual_cost, vpc.pending_cost, vpc.budget_variance, vpc.expense_total, vpc.purchase_total, COALESCE(ua.full_name, ui.full_name) AS in_charge_name,
                      (SELECT COUNT(*) FROM quotations q WHERE q.project_id = p.id)
                      + (SELECT COUNT(*) FROM client_quotations cq WHERE cq.project_id = p.id) AS quotation_count
@@ -379,8 +425,12 @@ try {
               LEFT JOIN v_project_costs vpc ON vpc.project_id = p.id
               LEFT JOIN users ua ON p.assigned_to = ua.id
               LEFT JOIN users ui ON p.in_charge_id = ui.id
-              ORDER BY p.created_at DESC";
-    $projects = $pdo->query($query)->fetchAll();
+              $sqlWhere
+              ORDER BY $sort $dir
+              LIMIT $perPage OFFSET " . (($pageNo - 1) * $perPage);
+    $listStmt = $pdo->prepare($query);
+    $listStmt->execute($params);
+    $projects = $listStmt->fetchAll();
 } catch (PDOException $e) {
     $error = userDatabaseError($e);
 }
@@ -408,8 +458,8 @@ if ($action === 'add' && !canEncodeApprovedProject()) {
     header('Location: projects.php');
     exit();
 }
-if ($action === 'edit' && !canSaveProjectRecord()) {
-    $_SESSION['error'] = 'You cannot edit this project.';
+if ($action === 'edit') {
+    $_SESSION['error'] = 'Projects cannot be edited after they are created.';
     header('Location: projects.php' . ($id ? '?action=view&id=' . $id : ''));
     exit();
 }
@@ -570,24 +620,24 @@ include '../../includes/header.php';
             </div>
         </div>
         
+        <?php
+        $projectToday = date('Y-m-d');
+        $startDateValue = nullableDate($project_details['start_date'] ?? '') ?? '';
+        if ($action === 'add' && ($startDateValue === '' || $startDateValue < $projectToday)) {
+            $startDateValue = $projectToday;
+        }
+        $startDateMin = ($action === 'add' || $startDateValue === '' || $startDateValue >= $projectToday) ? $projectToday : $startDateValue;
+        $createStatus = !empty($project_details['assigned_to']) || $action === 'add' ? 'Assigned' : 'Planning';
+        ?>
         <div class="form-row">
             <div class="form-group">
                 <label class="required">Start Date</label>
-                <input type="date" name="start_date" id="projectStartDate" required value="<?php echo htmlspecialchars(nullableDate($project_details['start_date'] ?? '') ?? ''); ?>">
-            </div>
-            <div class="form-group">
-                <label class="required">End Date</label>
-                <input type="date" name="end_date" id="projectEndDate" required value="<?php echo htmlspecialchars(nullableDate($project_details['end_date'] ?? '') ?? ''); ?>">
+                <input type="date" name="start_date" id="projectStartDate" required min="<?php echo htmlspecialchars($startDateMin); ?>" value="<?php echo htmlspecialchars($startDateValue); ?>">
             </div>
             <div class="form-group">
                 <label>Status</label>
-                <select name="status">
-                    <option value="assigned" <?php echo ($project_details['status'] ?? ($action === 'add' ? 'assigned' : '')) == 'assigned' ? 'selected' : ''; ?>>Assigned</option>
-                    <option value="planning" <?php echo ($project_details['status'] ?? '') == 'planning' ? 'selected' : ''; ?>>Planning</option>
-                    <option value="ongoing" <?php echo ($project_details['status'] ?? '') == 'ongoing' ? 'selected' : ''; ?>>Ongoing</option>
-                    <option value="completed" <?php echo ($project_details['status'] ?? '') == 'completed' ? 'selected' : ''; ?>>Completed</option>
-                    <option value="on_hold" <?php echo ($project_details['status'] ?? '') == 'on_hold' ? 'selected' : ''; ?>>On Hold</option>
-                </select>
+                <input type="text" value="<?php echo $action === 'add' ? 'Assigned' : htmlspecialchars(ucfirst(str_replace('_', ' ', (string) ($project_details['status'] ?? 'planning')))); ?>" readonly>
+                <small><?php echo $action === 'add' ? 'A new project starts as Assigned when an Engineering lead is chosen.' : 'Status is changed from Progress Updates.'; ?></small>
             </div>
         </div>
         
@@ -614,18 +664,16 @@ include '../../includes/header.php';
 (function () {
     const form = document.getElementById('projectForm');
     const start = document.getElementById('projectStartDate');
-    const end = document.getElementById('projectEndDate');
-    function syncEndMin() {
-        if (!start || !end) return;
-        end.min = start.value || '';
-        if (start.value && end.value && end.value < start.value) end.value = '';
+    const today = <?php echo json_encode(date('Y-m-d')); ?>;
+    const creating = <?php echo $action === 'add' ? 'true' : 'false'; ?>;
+    if (creating && start) {
+        start.min = today;
+        if (!start.value || start.value < today) start.value = today;
     }
-    start?.addEventListener('change', syncEndMin);
     form?.addEventListener('submit', function () {
         const button = form.querySelector('button[type="submit"]');
         if (button) button.disabled = true;
     });
-    syncEndMin();
 })();
 </script>
 <script>
@@ -639,7 +687,6 @@ document.getElementById('projectSource')?.addEventListener('change', function ()
     form.elements.location.value = source.location || '';
     form.elements.estimated_budget.value = source.budget || '';
     form.elements.start_date.value = source.start || '';
-    form.elements.end_date.value = source.end || '';
     form.elements.description.value = source.description || '';
 });
 document.getElementById('projectSource')?.dispatchEvent(new Event('change'));
@@ -685,13 +732,14 @@ document.getElementById('projectQuoteFile')?.addEventListener('change', async ()
         <div class="detail-row"><span>Location:</span> <?php echo htmlspecialchars($project_details['location'] ?? 'N/A'); ?></div>
         <div class="detail-row"><span>Client:</span> <?php echo htmlspecialchars($project_details['client'] ?? 'N/A'); ?></div>
         <div class="detail-row"><span>Subject:</span> <?php echo htmlspecialchars($project_details['subject'] ?? 'N/A'); ?></div>
-        <div class="detail-row"><span>Quotation file:</span> <?php if (!empty($project_details['quotation_path'])): ?><a href="<?php echo APP_URL . htmlspecialchars($project_details['quotation_path']); ?>" target="_blank"><?php echo htmlspecialchars($project_details['quotation_name'] ?: 'View file'); ?></a><?php else: ?>No file attached<?php endif; ?></div>
+        <div class="detail-row"><span>Quotation file:</span> <?php if (!empty($project_details['quotation_path'])): ?><a href="<?php echo htmlspecialchars(projectQuotationDownloadUrl((int) $project_details['id'])); ?>"><?php echo htmlspecialchars($project_details['quotation_name'] ?: 'Download Excel'); ?></a><?php else: ?>No file attached<?php endif; ?></div>
         <div class="detail-row"><span>Accounting:</span> <?php $acctDecision = accountingDecisionLabel($project_details['accounting_status'] ?? ''); ?><span class="badge badge-<?php echo $acctDecision === 'approved' ? 'approved' : ($acctDecision === 'rejected' ? 'rejected' : 'pending'); ?>"><?php echo ucfirst($acctDecision); ?></span></div>
         <div class="detail-row"><span>Engineering:</span> <?php echo !empty($project_details['engineering_received_at']) ? 'Received ' . date('M d, Y h:i A', strtotime($project_details['engineering_received_at'])) : 'Waiting in Received Projects'; ?></div>
         <div class="detail-row"><span>Project In-Charge:</span> <?php echo htmlspecialchars($project_details['in_charge_name'] ?? 'Not assigned (Accounting)'); ?></div>
         <div class="detail-row"><span>Status:</span> <span class="badge badge-<?php echo $project_details['status']; ?>"><?php echo ucfirst($project_details['status']); ?></span></div>
         <div class="detail-row"><span>Start Date:</span> <?php echo formatDisplayDate($project_details['start_date'] ?? null); ?></div>
         <div class="detail-row"><span>End Date:</span> <?php echo formatDisplayDate($project_details['end_date'] ?? null); ?></div>
+        <div class="detail-row"><span>Completion Date:</span> <?php echo formatDisplayDate($project_details['completion_date'] ?? null); ?></div>
         <div class="detail-row"><span>Estimated Budget:</span> <strong>₱<?php echo number_format((float) $project_details['estimated_budget'], 2); ?></strong></div>
         <div class="detail-row" <?php echo ((float) ($project_details['actual_cost'] ?? 0) > (float) $project_details['estimated_budget']) ? 'style="background:#fee2e2;"' : ''; ?>><span>Actual Cost:</span> <strong>₱<?php echo number_format((float) ($project_details['actual_cost'] ?? 0), 2); ?></strong></div>
         <div class="detail-row"><span>Pending/Committed:</span> <strong>₱<?php echo number_format((float) ($project_details['pending_cost'] ?? 0), 2); ?></strong></div>
@@ -707,9 +755,6 @@ document.getElementById('projectQuoteFile')?.addEventListener('change', async ()
         <?php endif; ?>
     </div>
     <div style="margin-top:1.5rem; display:flex; gap:0.5rem; flex-wrap:wrap;">
-        <?php if (canWriteDepartmentData('projects')): ?>
-        <a href="?action=edit&id=<?php echo $project_details['id']; ?>" class="btn btn-warning"><i class="fas fa-edit"></i> Edit</a>
-        <?php endif; ?>
         <a href="project_pdf.php?id=<?php echo (int)$project_details['id']; ?>" class="btn btn-outline"><i class="fas fa-download"></i> Download PDF</a>
         <a href="project_details.php?id=<?php echo $project_details['id']; ?>" class="btn btn-info"><i class="fas fa-chart-bar"></i> Full Details</a>
         <?php if (canEncodeApprovedProject() || canDelete('projects')): ?>
@@ -735,12 +780,8 @@ document.getElementById('projectQuoteFile')?.addEventListener('change', async ()
 <?php else: ?>
 <!-- List View -->
 <div class="card">
-    <p style="color:#64748b;margin-top:0;">Approved projects encoded by Executive Admin. The attached quotation is included when Accounting opens the project under Received Projects.</p>
     <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem; flex-wrap:wrap; gap:0.5rem;">
-        <h3 style="margin:0;"><i class="fas fa-list"></i> Centralized Project Status (<?php echo count($projects); ?>)</h3>
-        <div style="display:flex; gap:0.5rem;">
-            <input type="text" id="searchProject" placeholder="Search projects..." style="padding:0.4rem 0.8rem; border:1px solid var(--border-color); border-radius:6px; font-size:0.85rem;">
-        </div>
+        <h3 style="margin:0;"><i class="fas fa-list"></i> Project List (<?php echo (int) ($projectTotal ?? count($projects)); ?>)</h3>
     </div>
     <div class="table-responsive">
         <table class="table" id="projectTable">
@@ -776,7 +817,7 @@ document.getElementById('projectQuoteFile')?.addEventListener('change', async ()
                         <td><?php echo htmlspecialchars($project['client'] ?? '—'); ?></td>
                         <td>
                             <?php if (!empty($project['quotation_path'])): ?>
-                                <a href="<?php echo APP_URL . htmlspecialchars($project['quotation_path']); ?>" target="_blank"><?php echo htmlspecialchars($project['quotation_name'] ?: 'View file'); ?></a>
+                                <a href="<?php echo htmlspecialchars(projectQuotationDownloadUrl((int) $project['id'])); ?>"><?php echo htmlspecialchars($project['quotation_name'] ?: 'Download Excel'); ?></a>
                             <?php else: ?>
                                 No file
                             <?php endif; ?>
@@ -796,8 +837,11 @@ document.getElementById('projectQuoteFile')?.addEventListener('change', async ()
                         <td>
                             <div style="display:flex; gap:0.3rem; flex-wrap:wrap;">
                                 <a href="?action=view&id=<?php echo $project['id']; ?>" class="btn btn-sm btn-info" title="View"><i class="fas fa-eye"></i></a>
-                                <?php if (canSaveProjectRecord()): ?>
-                                <a href="?action=edit&id=<?php echo $project['id']; ?>" class="btn btn-sm btn-warning" title="Edit"><i class="fas fa-edit"></i></a>
+                                <?php if (canEncodeApprovedProject() && empty($project['archived_at'])): ?>
+                                <form method="post" style="display:inline;">
+                                    <input type="hidden" name="project_id" value="<?php echo (int) $project['id']; ?>">
+                                    <button class="btn btn-sm btn-secondary" name="archive_project" value="1">Archive</button>
+                                </form>
                                 <?php endif; ?>
                                 <?php if (canEncodeApprovedProject() || canDelete('projects')): ?>
                                 <?php

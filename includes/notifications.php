@@ -79,6 +79,43 @@ function notifyAccountingReceived(int $projectId): void
     notify('warehouse', 'sent_to_warehouse', 'Sent to Warehouse', 'Accounting has sent ' . $code . ' to the Warehouse.', 'modules/warehouse/material_requests.php', $projectId, 'project', $projectId);
 }
 
+function sendPurchaseOrderToWarehouse(int $poId): string
+{
+    global $pdo;
+    $stmt = $pdo->prepare("SELECT id, po_number, status, project_id FROM purchase_orders WHERE id = ?");
+    $stmt->execute([$poId]);
+    $order = $stmt->fetch();
+    if (!$order) {
+        return 'That purchase order was not found.';
+    }
+    if ($order['status'] === 'ready_for_warehouse') {
+        return $order['po_number'] . ' is already with the Warehouse.';
+    }
+    if (!in_array($order['status'], ['sent', 'confirmed'], true)) {
+        return 'Set ' . $order['po_number'] . ' to Sent or Confirmed before sending it to Warehouse.';
+    }
+    $update = $pdo->prepare("UPDATE purchase_orders SET status = 'ready_for_warehouse' WHERE id = ? AND status IN ('confirmed', 'sent') AND received_at IS NULL");
+    $update->execute([$poId]);
+    if ($update->rowCount() < 1) {
+        return 'Set ' . $order['po_number'] . ' to Sent or Confirmed before sending it to Warehouse.';
+    }
+    $projectId = (int) ($order['project_id'] ?? 0);
+    notify(
+        'warehouse',
+        'po_ready',
+        'Purchase order ready to receive',
+        $order['po_number'] . ' was sent by Procurement. Warehouse can receive the materials.',
+        'modules/warehouse/receive_purchases.php?po=' . $poId,
+        $projectId > 0 ? $projectId : null,
+        'purchase_order',
+        $poId
+    );
+    if (function_exists('logActivity')) {
+        logActivity($_SESSION['user_id'] ?? null, 'Sent to warehouse', 'Procurement', $order['po_number']);
+    }
+    return '';
+}
+
 function notifyProjectRejected(int $projectId): void
 {
     $project = notifyProjectCode($projectId);

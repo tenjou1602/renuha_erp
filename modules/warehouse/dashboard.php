@@ -14,7 +14,7 @@ try {
         error_log('[Runeha ERP] department sync: ' . $e->getMessage());
     }
     $stats['total_inventory'] = $pdo->query("SELECT COUNT(*) FROM materials WHERE status = 'active' AND current_stock > 0")->fetchColumn() ?? 0;
-    $stats['inventory_value'] = $pdo->query("SELECT COALESCE(SUM(current_stock * cost_per_unit), 0) FROM materials WHERE status = 'active' AND current_stock > 0")->fetchColumn() ?? 0;
+    $stats['inventory_value'] = reportedDepartmentMoney((float) ($pdo->query("SELECT COALESCE(SUM(current_stock * cost_per_unit), 0) FROM materials WHERE status = 'active' AND current_stock > 0")->fetchColumn() ?? 0), 'warehouse');
     $stats['total_stock'] = $stats['total_inventory'];
     $stats['out_of_stock'] = $pdo->query("SELECT COUNT(*) FROM materials WHERE status = 'active' AND current_stock <= 0")->fetchColumn() ?? 0;
     $stats['low_stock'] = $pdo->query("SELECT COUNT(*) FROM materials WHERE current_stock > 0 AND current_stock <= min_stock AND min_stock > 0 AND status = 'active'")->fetchColumn() ?? 0;
@@ -74,7 +74,7 @@ include '../../includes/header.php';
     <?php renderLowStockBanner(APP_URL . 'modules/warehouse/inventory.php'); ?>
 
     <div class="dept-kpis">
-        <a class="dept-kpi green" href="inventory.php"><div class="ico"><i class="fas fa-boxes"></i></div><div><div class="num" title="Inventory value <?php echo formatCompactMoney($stats['inventory_value'] ?? 0); ?>. Count of items with stock, not a sum of mixed units."><?php echo number_format($stats['total_inventory'] ?? 0); ?></div><div class="lbl">Items In Stock</div></div></a>
+        <a class="dept-kpi green" href="inventory.php"><div class="ico"><i class="fas fa-boxes"></i></div><div><div class="num" title="Inventory value <?php echo formatCompactMoney($stats['inventory_value'] ?? 0); ?>. Count of items with stock, not a sum of mixed units."><?php echo number_format($stats['total_inventory'] ?? 0); ?></div><div class="lbl">Items In Stock<?php echo adjustmentIncludedLabel('warehouse'); ?></div></div></a>
         <a class="dept-kpi orange" href="inventory.php"><div class="ico"><i class="fas fa-exclamation-triangle"></i></div><div><div class="num"><?php echo number_format($stats['low_stock'] ?? 0); ?></div><div class="lbl">Low Stock Items</div></div></a>
         <a class="dept-kpi teal" href="receive_purchases.php"><div class="ico"><i class="fas fa-truck-loading"></i></div><div><div class="num"><?php echo number_format($stats['incoming_materials'] ?? 0); ?></div><div class="lbl">Incoming Materials</div></div></a>
         <a class="dept-kpi red" href="material_requests.php"><div class="ico"><i class="fas fa-dolly"></i></div><div><div class="num"><?php echo number_format($stats['pending_releases'] ?? 0); ?></div><div class="lbl">Pending Releases</div></div></a>

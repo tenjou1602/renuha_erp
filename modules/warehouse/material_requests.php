@@ -84,7 +84,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     if (isset($_POST['release_project_requests'])) {
         try {
-            $result = releasePendingProjectMaterials($pdo, (int) ($_POST['project_id'] ?? 0), (int) $_SESSION['user_id']);
+            $result = releasePendingProjectMaterials($pdo, (int) ($_POST['project_id'] ?? 0), (int) $_SESSION['user_id'], (string) ($_POST['checked_by'] ?? ''));
             foreach ($result['alerts'] as $alert) {
                 logActivity($_SESSION['user_id'], 'Low stock alert', 'Warehouse', $alert['name'] . ' at ' . $alert['stock'] . ' (min ' . $alert['min'] . ')');
                 try {
@@ -139,15 +139,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if ($release_quantity > (int) $request['quantity']) {
                 throw new Exception('Release quantity cannot exceed requested quantity.');
             }
+            if (($request['flow_status'] ?? '') !== 'warehouse') {
+                throw new Exception(warehouseReleaseBlockedMessage((string) ($request['flow_status'] ?? '')));
+            }
+            assertMonthOpen('warehouse', date('Y-m-d'));
             $status = $release_quantity >= (int) $request['quantity'] ? 'approved' : 'partial';
             $projectLabel = trim(($request['project_code'] ?? '') . ' ' . ($request['project_name'] ?? ''));
             $reason = 'Released to project site ' . ($projectLabel !== '' ? $projectLabel : ('#' . $request['project_id']));
             if ($notes !== '') {
                 $reason .= ': ' . $notes;
             }
+            $checkedBy = warehouseCheckedByName($_POST['checked_by'] ?? '');
+            $reason .= ' Released by ' . $checkedBy . '.';
+            ensureWarehouseCheckerColumns($pdo);
 
-            $stmt = $pdo->prepare("UPDATE material_requests SET status = ?, released_quantity = ?, released_by = ?, released_at = NOW(), notes = ? WHERE id = ? AND status = 'pending'");
-            $stmt->execute([$status, $release_quantity, $_SESSION['user_id'], $notes, $request_id]);
+            $stmt = $pdo->prepare("UPDATE material_requests SET status = ?, released_quantity = ?, released_by = ?, released_by_name = ?, released_at = NOW(), notes = ? WHERE id = ? AND status = 'pending'");
+            $stmt->execute([$status, $release_quantity, $_SESSION['user_id'], $checkedBy, $notes, $request_id]);
             $stmt = $pdo->prepare("UPDATE materials SET current_stock = current_stock - ? WHERE id = ?");
             $stmt->execute([$release_quantity, $request['material_id']]);
             $stockRow = $pdo->prepare("SELECT id FROM warehouse_stock WHERE material_id = ? ORDER BY id DESC LIMIT 1");
@@ -195,26 +202,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if (!empty($request['purchase_request_id'])) {
                 throw new Exception('This request already has a purchase request.');
             }
-            $shortage = (int) $request['quantity'] - (int) $request['current_stock'];
-            if ($shortage <= 0) {
-                throw new Exception('Stock covers this request. Release it instead of buying more.');
-            }
-            $pr_number = generateNumber('PR', 'purchase_requests', 'pr_number');
-            $unitCost = (float) ($request['cost_per_unit'] ?? 0);
-            $total = round($shortage * $unitCost, 2);
-            $purpose = 'Stock shortage for inventory release #' . $request_id . ' (' . $request['material_name'] . ')';
-            $stmt = $pdo->prepare("INSERT INTO purchase_requests (pr_number, project_id, requestor_id, purpose, priority, status, total_amount, created_by) VALUES (?, ?, ?, ?, 'high', 'pending', ?, ?)");
-            $stmt->execute([$pr_number, $request['project_id'], $_SESSION['user_id'], $purpose, $total, $_SESSION['user_id']]);
-            $prId = (int) $pdo->lastInsertId();
-            $stmt = $pdo->prepare("INSERT INTO purchase_request_items (purchase_request_id, material_id, quantity, unit, estimated_cost, remarks) VALUES (?, ?, ?, ?, ?, ?)");
-            $stmt->execute([$prId, $request['material_id'], $shortage, $request['unit'] ?: 'pcs', $unitCost, 'Raised by Warehouse because on-hand stock is short.']);
-            $stmt = $pdo->prepare("UPDATE material_requests SET purchase_request_id = ? WHERE id = ?");
-            $stmt->execute([$prId, $request_id]);
-            $pdo->commit();
-            logActivity($_SESSION['user_id'], 'Sent shortage to procurement', 'Warehouse', "Request #$request_id -> $pr_number, shortage $shortage");
-            $_SESSION['success'] = "Purchase request $pr_number sent to Procurement for the shortage.";
-            header('Location: material_requests.php');
-            exit();
+            throw new Exception('Materials, quantity, and price come from the project Excel and cannot be edited. Download the Excel to view them.');
         } catch (Exception $e) {
             if ($pdo->inTransaction()) {
                 $pdo->rollBack();
@@ -238,7 +226,7 @@ try {
     if ($table_exists) {
         $material_requests = $pdo->query("
             SELECT mr.*, p.project_code, p.name as project_name, p.location AS project_location, m.material_code, m.name as material_name, m.unit, m.current_stock,
-                   u1.full_name as requested_by_name, u2.full_name as released_by_name, prq.pr_number
+                   u1.full_name as requested_by_name, u2.full_name as released_by_user, prq.pr_number
             FROM material_requests mr
             LEFT JOIN projects p ON mr.project_id = p.id
             LEFT JOIN materials m ON mr.material_id = m.id
@@ -336,7 +324,7 @@ include '../../includes/header.php';
         <div style="font-size:0.75rem;color:#64748b;">For release</div>
         <div style="font-size:1.5rem;font-weight:700;">
             <?php 
-            $pending = array_filter($material_requests, function($m) { return $m['status'] === 'pending'; });
+            $pending = array_filter($material_requests, function($m) { return $m['status'] === 'pending' && ($m['flow_status'] ?? '') === 'warehouse'; });
             echo count($pending);
             ?>
         </div>
@@ -388,11 +376,13 @@ include '../../includes/header.php';
                         <th>Request Date</th>
                         <th>Status</th>
                         <th>Requested By</th>
+                        <th>Released By</th>
                         <th>Action</th>
                     </tr>
                 </thead>
                 <tbody>
                     <?php $projectReleaseShown = []; ?>
+                    <?php $projectWaitingShown = []; ?>
                     <?php foreach ($material_requests as $request): ?>
                     <tr>
                         <td><strong>#<?php echo $request['id']; ?></strong></td>
@@ -412,27 +402,37 @@ include '../../includes/header.php';
                         <td><?php echo date('M d, Y', strtotime($request['request_date'])); ?></td>
                         <td><span class="badge badge-<?php echo $request['status'] === 'approved' ? 'success' : htmlspecialchars($request['status']); ?>"><?php echo $request['status'] === 'approved' ? 'Released to site' : ($request['status'] === 'partial' ? 'Partial release' : ucfirst($request['status'])); ?></span></td>
                         <td><?php echo htmlspecialchars($request['requested_by_name'] ?? 'N/A'); ?></td>
+                        <td><?php
+                            $releasedName = trim((string) ($request['released_by_name'] ?? ''));
+                            if ($releasedName === '') {
+                                $releasedName = trim((string) ($request['released_by_user'] ?? ''));
+                            }
+                            echo $releasedName !== '' ? 'Released by ' . htmlspecialchars($releasedName) : '—';
+                        ?></td>
                         <td>
                             <?php if ($request['status'] === 'pending' && canWriteDepartmentData('warehouse')): ?>
-                                <?php if (empty($projectReleaseShown[(int) $request['project_id']])): ?>
+                                <?php $readyForRelease = ($request['flow_status'] ?? '') === 'warehouse'; ?>
+                                <?php if ($readyForRelease && empty($projectReleaseShown[(int) $request['project_id']])): ?>
                                     <?php $projectReleaseShown[(int) $request['project_id']] = true; ?>
                                     <a href="receive_purchases.php" class="btn btn-sm btn-outline">Receiving</a>
                                     <?php if ((float) $request['current_stock'] <= 0): ?>
                                         <span class="badge badge-secondary">Out of stock</span>
                                     <?php else: ?>
-                                    <form method="POST" style="display:inline;" onsubmit="return confirm('Release all pending materials for this project in the requested quantities?');">
+                                    <form method="POST" style="display:inline;" onsubmit="return askCheckedBy(this, 'Release by — who checked this item?');">
                                         <input type="hidden" name="release_project_requests" value="1">
+                                        <input type="hidden" name="checked_by" value="">
                                         <input type="hidden" name="project_id" value="<?php echo (int) $request['project_id']; ?>">
                                         <button type="submit" class="btn btn-sm btn-primary"><i class="fas fa-arrow-up"></i> Release all to site</button>
                                     </form>
                                     <?php endif; ?>
+                                <?php elseif (!$readyForRelease && empty($projectWaitingShown[(int) $request['project_id']])): ?>
+                                    <?php $projectWaitingShown[(int) $request['project_id']] = true; ?>
+                                    <span class="text-muted"><?php echo htmlspecialchars(warehouseReleaseBlockedMessage((string) ($request['flow_status'] ?? ''))); ?></span>
                                 <?php endif; ?>
-                                <?php if ((int) $request['current_stock'] < (int) $request['quantity'] && empty($request['purchase_request_id'])): ?>
-                                    <form method="POST" style="display:inline;">
-                                        <input type="hidden" name="request_id" value="<?php echo (int) $request['id']; ?>">
-                                        <button type="submit" name="send_to_procurement" class="btn btn-sm btn-warning" onclick="return confirm('Send the shortage to Procurement?')">Buy shortage</button>
-                                    </form>
-                                <?php elseif (!empty($request['pr_number'])): ?>
+                                <?php if (!empty($request['project_id'])): ?>
+                                    <a class="btn btn-sm btn-outline" href="<?php echo APP_URL; ?>modules/projects/quotation_download.php?project_id=<?php echo (int) $request['project_id']; ?>">Excel</a>
+                                <?php endif; ?>
+                                <?php if (!empty($request['pr_number'])): ?>
                                     <?php if (canViewModule('procurement')): ?>
                                         <a href="<?php echo APP_URL; ?>modules/procurement/purchase_requests.php?action=view&id=<?php echo (int) $request['purchase_request_id']; ?>" class="btn btn-sm btn-info"><?php echo htmlspecialchars($request['pr_number']); ?></a>
                                     <?php else: ?>
@@ -440,6 +440,9 @@ include '../../includes/header.php';
                                     <?php endif; ?>
                                 <?php endif; ?>
                             <?php else: ?>
+                                <?php if (!empty($request['project_id'])): ?>
+                                    <a class="btn btn-sm btn-outline" href="<?php echo APP_URL; ?>modules/projects/quotation_download.php?project_id=<?php echo (int) $request['project_id']; ?>">Excel</a>
+                                <?php endif; ?>
                                 <?php if (!empty($request['pr_number']) && canViewModule('procurement')): ?>
                                     <a href="<?php echo APP_URL; ?>modules/procurement/purchase_requests.php?action=view&id=<?php echo (int) $request['purchase_request_id']; ?>" class="btn btn-sm btn-info"><?php echo htmlspecialchars($request['pr_number']); ?></a>
                                 <?php else: ?>
@@ -456,4 +459,23 @@ include '../../includes/header.php';
     <?php endif; ?>
 </div>
 
+<script>
+function askCheckedBy(form, label) {
+    const entered = window.prompt(label);
+    if (entered === null) {
+        return false;
+    }
+    const name = entered.trim();
+    if (!name) {
+        window.alert('Enter the employee who checked the item.');
+        return false;
+    }
+    const field = form.querySelector('input[name="checked_by"]');
+    if (!field) {
+        return false;
+    }
+    field.value = name;
+    return true;
+}
+</script>
 <?php include '../../includes/footer.php'; ?>

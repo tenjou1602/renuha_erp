@@ -224,6 +224,110 @@ function invoiceClientLabel(array $invoice) {
     return (string) ($invoice['client'] ?? '');
 }
 
+/** Paid expenses on the purchase order that came from this invoice's supplier quotation. */
+function invoiceAccountingPaidSql(string $invoiceAlias = 'i'): string
+{
+    return "(SELECT COALESCE(SUM(e.amount), 0)
+        FROM quotations q
+        INNER JOIN purchase_orders po ON po.purchase_request_id = q.purchase_request_id AND po.status <> 'cancelled'
+        INNER JOIN expenses e ON e.purchase_order_id = po.id AND e.status = 'paid'
+        WHERE q.id = {$invoiceAlias}.procurement_quotation_id)";
+}
+
+function invoiceAccountingExpenseSql(string $invoiceAlias = 'i'): string
+{
+    return "(SELECT GROUP_CONCAT(DISTINCT e.expense_number ORDER BY e.id SEPARATOR ', ')
+        FROM quotations q
+        INNER JOIN purchase_orders po ON po.purchase_request_id = q.purchase_request_id AND po.status <> 'cancelled'
+        INNER JOIN expenses e ON e.purchase_order_id = po.id AND e.status = 'paid'
+        WHERE q.id = {$invoiceAlias}.procurement_quotation_id)";
+}
+
+/**
+ * Show an invoice as paid when Accounting has already paid the linked expense.
+ * The invoice row itself is left unchanged.
+ */
+function invoiceWithAccountingPayment(array $invoice): array
+{
+    $amount = round((float) ($invoice['amount'] ?? 0), 2);
+    $recorded = round((float) ($invoice['paid_amount'] ?? 0), 2);
+    $accounting = round((float) ($invoice['accounting_paid'] ?? 0), 2);
+    $shown = max($recorded, $accounting);
+    if ($amount > 0) {
+        $shown = min($amount, $shown);
+    }
+    $status = (string) ($invoice['status'] ?? 'draft');
+    if ($status === 'draft' && $amount > 0) {
+        $shown = $amount;
+        $status = 'paid';
+    } elseif ($status !== 'cancelled' && $amount > 0 && $shown >= $amount) {
+        $status = 'paid';
+    } elseif ($status === 'draft' && $shown > 0) {
+        $status = 'partial';
+    }
+    $invoice['paid_amount'] = $shown;
+    $invoice['status'] = $status;
+    return $invoice;
+}
+
+/**
+ * Create one Draft invoice for a Procurement quotation sent to Accounting.
+ * Call this inside the caller's transaction. Returns the new invoice id, or null when
+ * an invoice is already linked. invoices.quotation_id stays null because that column
+ * belongs to client_quotations; the link is invoices.procurement_quotation_id.
+ */
+function createDraftInvoiceForReceivedQuotation(PDO $pdo, int $quotationId, $userId): ?int
+{
+    $stmt = $pdo->prepare("
+        SELECT q.id, q.status, q.project_id, q.total_amount, p.client AS project_client
+        FROM quotations q
+        LEFT JOIN projects p ON p.id = q.project_id
+        WHERE q.id = ?
+        FOR UPDATE
+    ");
+    $stmt->execute([$quotationId]);
+    $quote = $stmt->fetch();
+    if (!$quote) {
+        return null;
+    }
+    $clientId = null;
+    $clientName = trim((string) ($quote['project_client'] ?? ''));
+    if ($clientName !== '') {
+        $clientStmt = $pdo->prepare("SELECT id FROM clients WHERE status = 'active' AND LOWER(name) = LOWER(?) ORDER BY id LIMIT 1");
+        $clientStmt->execute([$clientName]);
+        $foundClient = $clientStmt->fetchColumn();
+        $clientId = $foundClient ? (int) $foundClient : null;
+    }
+
+    $exists = $pdo->prepare("SELECT id FROM invoices WHERE procurement_quotation_id = ? LIMIT 1");
+    $exists->execute([$quotationId]);
+    if ($exists->fetchColumn()) {
+        return null;
+    }
+
+    $amount = round((float) ($quote['total_amount'] ?? 0), 2);
+    $invoiceNumber = generateNumber('INV', 'invoices', 'invoice_number');
+    $insert = $pdo->prepare("
+        INSERT INTO invoices (
+            invoice_number, project_id, quotation_id, procurement_quotation_id,
+            client_id, client, client_name, invoice_date, due_date,
+            amount, subtotal, paid_amount, notes, status, created_by
+        ) VALUES (?, ?, NULL, ?, ?, ?, ?, CURDATE(), NULL, ?, ?, 0, NULL, 'draft', ?)
+    ");
+    $insert->execute([
+        $invoiceNumber,
+        !empty($quote['project_id']) ? (int) $quote['project_id'] : null,
+        $quotationId,
+        $clientId,
+        $clientName,
+        $clientName,
+        $amount,
+        $amount,
+        $userId ?: null,
+    ]);
+    return (int) $pdo->lastInsertId();
+}
+
 function ledgerEntryExists($referenceType, $referenceId) {
     global $pdo;
     $stmt = $pdo->prepare("SELECT id FROM journal_entries WHERE reference_type = ? AND reference_id = ?");
@@ -384,6 +488,117 @@ function findOrCreateClientByName($name) {
     return requireActiveClient((int) $pdo->lastInsertId());
 }
 
+function ensureAdditionalFundColumn(PDO $pdo): void
+{
+    static $done = false;
+    if ($done) {
+        return;
+    }
+    $done = true;
+    try {
+        $col = $pdo->query("SHOW COLUMNS FROM funds LIKE 'is_additional'")->fetch();
+        if (!$col) {
+            $pdo->exec("ALTER TABLE funds ADD COLUMN is_additional TINYINT(1) NOT NULL DEFAULT 0 AFTER status");
+        }
+        $invoiceCol = $pdo->query("SHOW COLUMNS FROM funds LIKE 'invoice_id'")->fetch();
+        if (!$invoiceCol) {
+            $pdo->exec("ALTER TABLE funds ADD COLUMN invoice_id BIGINT UNSIGNED NULL AFTER is_additional");
+        }
+    } catch (PDOException $e) {
+        error_log('[Runeha ERP] additional fund column: ' . $e->getMessage());
+    }
+}
+
+function createAdditionalFundInvoice(PDO $pdo, array $project, float $amount, string $notes, $userId): array
+{
+    $amount = round($amount, 2);
+    $code = (string) ($project['project_code'] ?? '');
+    $name = (string) ($project['name'] ?? '');
+    $clientName = trim((string) ($project['client'] ?? ''));
+    if ($clientName === '') {
+        $clientName = trim($code . ' — ' . $name, ' —');
+    }
+    $clientId = null;
+    $lookup = $pdo->prepare("SELECT id FROM clients WHERE status = 'active' AND LOWER(name) = LOWER(?) ORDER BY id LIMIT 1");
+    $lookup->execute([$clientName]);
+    $found = $lookup->fetchColumn();
+    if ($found) {
+        $clientId = (int) $found;
+    }
+    $invoiceNumber = generateNumber('INV', 'invoices', 'invoice_number');
+    $note = 'Additional fund requested for ' . $code . ' — ' . $name . '.';
+    if (trim($notes) !== '') {
+        $note .= ' ' . trim($notes);
+    }
+    $insert = $pdo->prepare("INSERT INTO invoices (invoice_number, project_id, quotation_id, procurement_quotation_id, client_id, client, client_name, invoice_date, due_date, amount, subtotal, paid_amount, notes, status, created_by) VALUES (?, ?, NULL, NULL, ?, ?, ?, CURDATE(), NULL, ?, ?, 0, ?, 'sent', ?)");
+    $insert->execute([
+        $invoiceNumber,
+        (int) $project['id'],
+        $clientId,
+        $clientName,
+        $clientName,
+        $amount,
+        $amount,
+        $note,
+        $userId ?: null,
+    ]);
+    $invoiceId = (int) $pdo->lastInsertId();
+    $line = 'Additional fund for ' . $code . ' — ' . $name;
+    $line = function_exists('mb_substr') ? mb_substr($line, 0, 255) : substr($line, 0, 255);
+    $item = $pdo->prepare("INSERT INTO invoice_items (invoice_id, line_type, material_id, description, quantity, unit, unit_price, line_total) VALUES (?, 'other', NULL, ?, 1, 'lot', ?, ?)");
+    $item->execute([$invoiceId, $line, $amount, $amount]);
+    postInvoiceEntry([
+        'id' => $invoiceId,
+        'invoice_number' => $invoiceNumber,
+        'invoice_date' => date('Y-m-d'),
+        'amount' => $amount,
+        'project_id' => (int) $project['id'],
+    ], $userId);
+    return ['id' => $invoiceId, 'invoice_number' => $invoiceNumber];
+}
+
+function syncProjectBudgetFunds(PDO $pdo, ?int $projectId = null): void
+{
+    try {
+        ensureAdditionalFundColumn($pdo);
+        $sql = "SELECT id, project_code, name, estimated_budget FROM projects";
+        if ($projectId) {
+            $sql .= " WHERE id = " . (int) $projectId;
+        }
+        $projects = $pdo->query($sql)->fetchAll();
+        $find = $pdo->prepare("SELECT id FROM funds WHERE project_id = ? AND is_additional = 0 ORDER BY id DESC");
+        $update = $pdo->prepare("UPDATE funds SET fund_name = ?, amount = ?, fund_type = 'project', status = 'active' WHERE id = ?");
+        $clear = $pdo->prepare("UPDATE funds SET amount = 0 WHERE id = ? AND is_additional = 0");
+        $insert = $pdo->prepare("INSERT INTO funds (fund_name, fund_type, amount, project_id, description, status, created_by) VALUES (?, 'project', ?, ?, ?, 'active', NULL)");
+        foreach ($projects as $project) {
+            $amount = round((float) $project['estimated_budget'], 2);
+            $label = $project['project_code'] . ' — ' . $project['name'];
+            if (function_exists('mb_substr')) {
+                $label = mb_substr($label, 0, 200);
+            } else {
+                $label = substr($label, 0, 200);
+            }
+            $find->execute([(int) $project['id']]);
+            $fundIds = $find->fetchAll(PDO::FETCH_COLUMN);
+            if ($fundIds) {
+                $update->execute([$label, $amount, (int) $fundIds[0]]);
+                foreach (array_slice($fundIds, 1) as $extraId) {
+                    $clear->execute([(int) $extraId]);
+                }
+                continue;
+            }
+            $insert->execute([
+                $label,
+                $amount,
+                (int) $project['id'],
+                'Project budget for ' . $project['project_code'] . '.',
+            ]);
+        }
+    } catch (PDOException $e) {
+        error_log('[Runeha ERP] project budget fund sync: ' . $e->getMessage());
+    }
+}
+
 function syncProjectFundsFromLabor(PDO $pdo, ?int $projectId = null): void
 {
     try {
@@ -506,7 +721,7 @@ function releasePaidOrderToWarehouse(PDO $pdo, int $expenseId): void
 function paySubmittedQuotation(PDO $pdo, int $quotationId, int $userId): string
 {
     $quoteStmt = $pdo->prepare("
-        SELECT id, quotation_number, project_id, purchase_request_id, supplier, supplier_contact, status, total_amount
+        SELECT id, quotation_number, project_id, purchase_request_id, supplier, supplier_contact, status, total_amount, created_by
         FROM quotations
         WHERE id = ? AND submitted_to_accounting_at IS NOT NULL
     ");
@@ -537,6 +752,12 @@ function paySubmittedQuotation(PDO $pdo, int $quotationId, int $userId): string
     $items = $lines->fetchAll();
     if (!$items) {
         throw new RuntimeException('This quotation has no materials to pay.');
+    }
+    if (function_exists('assertNotOwnApproval')) {
+        assertNotOwnApproval($quote['created_by'] ?? 0);
+    }
+    if (function_exists('assertMonthOpen')) {
+        assertMonthOpen('accounting', date('Y-m-d'));
     }
 
     $pdo->beginTransaction();

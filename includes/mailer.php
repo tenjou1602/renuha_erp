@@ -32,17 +32,21 @@ if (!function_exists('sendMail')) {
 
     function sendMail($to, $subject, $body) {
         try {
+            $GLOBALS['runeha_last_mail_error'] = '';
             if (empty($to) || !filter_var($to, FILTER_VALIDATE_EMAIL)) {
+                $GLOBALS['runeha_last_mail_error'] = 'Invalid recipient';
                 logActivity($_SESSION['user_id'] ?? null, 'Email skipped', 'Mail', 'Invalid recipient: ' . (string) $to);
                 return false;
             }
 
             if (!class_exists('PHPMailer\\PHPMailer\\PHPMailer')) {
+                $GLOBALS['runeha_last_mail_error'] = 'PHPMailer is not installed';
                 logActivity($_SESSION['user_id'] ?? null, 'Email failed', 'Mail', 'PHPMailer is not installed. Run composer install.');
                 return false;
             }
 
             if (!isSmtpConfigured()) {
+                $GLOBALS['runeha_last_mail_error'] = 'SMTP credentials are not configured';
                 logActivity($_SESSION['user_id'] ?? null, 'Email skipped', 'Mail', 'SMTP credentials are not configured. To: ' . $to . ' | ' . $subject);
                 return false;
             }
@@ -76,6 +80,7 @@ if (!function_exists('sendMail')) {
             $mail->send();
             return true;
         } catch (Throwable $e) {
+            $GLOBALS['runeha_last_mail_error'] = $e->getMessage();
             logActivity($_SESSION['user_id'] ?? null, 'Email failed', 'Mail', $e->getMessage() . ' | To: ' . $to . ' | ' . $subject);
             return false;
         }
@@ -170,6 +175,102 @@ if (!function_exists('sendMail')) {
             $body .= '<p><strong>Purpose:</strong> ' . htmlspecialchars($purpose) . '</p>';
         }
         notifyDepartment('procurement', $subject, $body);
+    }
+
+    function reminderClaim(string $recipient, string $subject, string $reference, string $period): bool {
+        global $pdo;
+        try {
+            $existing = $pdo->prepare("SELECT status FROM email_log WHERE recipient = ? AND reference_key = ? AND period_key = ?");
+            $existing->execute([$recipient, $reference, $period]);
+            $status = $existing->fetchColumn();
+            if ($status === 'sent') {
+                return false;
+            }
+            if ($status === 'failed') {
+                $pdo->prepare("UPDATE email_log SET status = 'sent', subject = ?, error_text = NULL, sent_at = NOW() WHERE recipient = ? AND reference_key = ? AND period_key = ?")
+                    ->execute([$subject, $recipient, $reference, $period]);
+                return true;
+            }
+            $pdo->prepare("INSERT INTO email_log (recipient, subject, reference_key, period_key, status) VALUES (?, ?, ?, ?, 'sent')")
+                ->execute([$recipient, $subject, $reference, $period]);
+            return true;
+        } catch (Throwable $e) {
+            return false;
+        }
+    }
+
+    function reminderFail(string $recipient, string $reference, string $period, string $error): void {
+        global $pdo;
+        try {
+            $pdo->prepare("UPDATE email_log SET status = 'failed', error_text = ? WHERE recipient = ? AND reference_key = ? AND period_key = ?")
+                ->execute([mb_substr($error, 0, 500), $recipient, $reference, $period]);
+        } catch (Throwable $e) {
+            error_log('[Runeha ERP] reminder log: ' . $e->getMessage());
+        }
+    }
+
+    function departmentMailRecipients(string $department): array {
+        global $pdo;
+        $stmt = $pdo->prepare("SELECT id, email, full_name FROM users WHERE department = ? AND status = 'active' AND email <> ''");
+        $stmt->execute([$department]);
+        $seen = [];
+        $recipients = [];
+        foreach ($stmt->fetchAll() as $user) {
+            $email = strtolower(trim((string) $user['email']));
+            if (!filter_var($email, FILTER_VALIDATE_EMAIL) || isset($seen[$email]) || str_ends_with($email, '@example.com')) {
+                continue;
+            }
+            $seen[$email] = true;
+            $user['email'] = $email;
+            $recipients[] = $user;
+        }
+        return $recipients;
+    }
+
+    function sendLoggedMail(string $to, string $subject, string $htmlBody, string $reference, string $period): bool {
+        if (!reminderClaim($to, $subject, $reference, $period)) {
+            return false;
+        }
+        if (!sendMail($to, $subject, mailTemplate($subject, $htmlBody))) {
+            reminderFail($to, $reference, $period, (string) ($GLOBALS['runeha_last_mail_error'] ?? 'SMTP send returned false'));
+            return false;
+        }
+        return true;
+    }
+
+    function notifyProjectArrived(int $projectId): void {
+        global $pdo;
+        try {
+            $stmt = $pdo->prepare("SELECT id, project_code, name, client, estimated_budget, accounting_status, engineering_received_at FROM projects WHERE id = ?");
+            $stmt->execute([$projectId]);
+            $project = $stmt->fetch();
+            if (!$project) {
+                return;
+            }
+            $code = (string) $project['project_code'];
+            $details = '<p><strong>Project:</strong> ' . htmlspecialchars($code . ' — ' . (string) $project['name']) . '<br>'
+                . '<strong>Client:</strong> ' . htmlspecialchars((string) ($project['client'] ?? '')) . '<br>'
+                . '<strong>Amount:</strong> ₱' . number_format((float) $project['estimated_budget'], 2) . '</p>';
+            $acctLink = APP_URL . 'modules/accounting/received_projects.php';
+            $acctBody = '<p>A new project is waiting for Accounting to approve or reject.</p>' . $details
+                . '<p>You have 7 days from today to approve or reject it. Reminders stop after 7 days, or when the project is approved or rejected.</p>'
+                . '<p><a href="' . htmlspecialchars($acctLink) . '">Open Received Projects</a></p>';
+            if (($project['accounting_status'] ?? '') === 'pending') {
+                foreach (departmentMailRecipients('accounting') as $user) {
+                    sendLoggedMail($user['email'], 'New project to approve: ' . $code, $acctBody, 'project-accounting-arrival:' . $projectId, 'arrival');
+                }
+            }
+            if (empty($project['engineering_received_at']) && ($project['accounting_status'] ?? '') !== 'rejected') {
+                $engLink = APP_URL . 'modules/projects/received_projects.php';
+                $engBody = '<p>A new project is waiting in Engineering Received Projects.</p>' . $details
+                    . '<p><a href="' . htmlspecialchars($engLink) . '">Open Received Projects</a></p>';
+                foreach (departmentMailRecipients('engineering') as $user) {
+                    sendLoggedMail($user['email'], 'New project for Engineering: ' . $code, $engBody, 'project-engineering-arrival:' . $projectId, 'arrival');
+                }
+            }
+        } catch (Throwable $e) {
+            error_log('[Runeha ERP] project arrival email: ' . $e->getMessage());
+        }
     }
 
     function lookupSupplierEmail($supplier_name) {

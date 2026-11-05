@@ -129,6 +129,19 @@ function isLoggedIn() {
     return isset($_SESSION['user_id']);
 }
 
+function runehaDevLoginEnabled(): bool {
+    $flag = getenv('RUNEHA_DEV_LOGIN');
+    if ($flag === false || $flag === '') {
+        $flag = $_SERVER['RUNEHA_DEV_LOGIN'] ?? '';
+    }
+    if (!in_array(strtolower(trim((string) $flag)), ['1', 'true', 'on'], true)) {
+        return false;
+    }
+    $host = strtolower((string) preg_replace('/:\d+$/', '', $_SERVER['HTTP_HOST'] ?? $_SERVER['SERVER_NAME'] ?? ''));
+    $remote = (string) ($_SERVER['REMOTE_ADDR'] ?? '');
+    return in_array($host, ['localhost', '127.0.0.1'], true) && in_array($remote, ['127.0.0.1', '::1'], true);
+}
+
 function requireLogin() {
     if (!isLoggedIn()) {
         header('Location: ' . APP_URL . 'login.php');
@@ -173,6 +186,9 @@ function logActivity($user_id, $action, $module, $details = null) {
     global $pdo;
     try {
         $ip = $_SERVER['REMOTE_ADDR'] ?? '0.0.0.0';
+        if (function_exists('isAdmin') && isAdmin()) {
+            $details = trim((string) $details . ' | actor=admin');
+        }
         $stmt = $pdo->prepare("INSERT INTO activity_log (user_id, action, module, details, ip_address) VALUES (?, ?, ?, ?, ?)");
         $stmt->execute([$user_id, $action, $module, $details, $ip]);
     } catch(PDOException $e) {
@@ -213,6 +229,7 @@ function nextHyphenSequence($table, $column, $like, $max_sane = 999999) {
         'projects' => 'project_code',
         'contracts' => 'contract_number',
         'materials' => 'material_code',
+        'fund_requests' => 'request_number',
     ];
     if (!isset($allowed_tables[$table]) || $allowed_tables[$table] !== $column) {
         return 1;
@@ -483,6 +500,13 @@ function formatDisplayDate($value): string {
     return date('M d, Y', strtotime($value));
 }
 
+function projectScheduleLabel($endDate, $completionDate = null, string $status = ''): string {
+    if ($status === 'completed') {
+        return formatDisplayDate($completionDate);
+    }
+    return formatDisplayDate($endDate);
+}
+
 function projectPurchaseCostSql(string $projectRef = 'p.id'): string {
     return "COALESCE((SELECT purchase_total FROM v_project_costs WHERE project_id = {$projectRef}), 0)";
 }
@@ -574,12 +598,45 @@ function accountingDecisionLabel(?string $status): string
 
 function accountingDecisionView(string $decision): string
 {
-    $html = '<span style="display:inline-flex;gap:0.25rem;flex-wrap:wrap;">';
-    foreach (['pending' => ['Pending', 'btn-warning'], 'approved' => ['Approved', 'btn-success'], 'rejected' => ['Rejected', 'btn-danger']] as $value => $item) {
-        $on = $decision === $value;
-        $html .= '<span class="btn btn-sm ' . ($on ? $item[1] : 'btn-outline') . '"' . ($on ? '' : ' style="opacity:.45;"') . '>' . $item[0] . '</span>';
+    $map = [
+        'approved' => ['Approved', 'approved'],
+        'rejected' => ['Rejected', 'rejected'],
+        'pending' => ['Pending', 'pending'],
+    ];
+    $item = $map[$decision] ?? $map['pending'];
+    return '<span class="badge badge-' . $item[1] . '">' . $item[0] . '</span>';
+}
+
+function latestProjectProgress(PDO $pdo, int $projectId): float
+{
+    if ($projectId <= 0) {
+        return 0.0;
     }
-    return $html . '</span>';
+    try {
+        $stmt = $pdo->prepare("SELECT completion_percentage FROM accomplishments WHERE project_id = ? ORDER BY id DESC LIMIT 1");
+        $stmt->execute([$projectId]);
+        $value = $stmt->fetchColumn();
+        return $value === false ? 0.0 : (float) $value;
+    } catch (Throwable $e) {
+        return 0.0;
+    }
+}
+
+function projectStageBlocker(PDO $pdo, string $status, $inChargeId, int $projectId = 0, ?float $progress = null): ?string
+{
+    if (!in_array($status, ['ongoing', 'completed'], true)) {
+        return null;
+    }
+    if ((int) $inChargeId <= 0) {
+        return 'Assign a Project In-Charge before this project can be ' . ($status === 'ongoing' ? 'Ongoing' : 'Completed') . '.';
+    }
+    if ($status === 'completed') {
+        $pct = $progress === null ? latestProjectProgress($pdo, $projectId) : $progress;
+        if ($pct < 100) {
+            return 'A project cannot be Completed until progress is 100%. Record a progress update at 100% first.';
+        }
+    }
+    return null;
 }
 
 function recallUnreleasedAccountingHandoff(PDO $pdo, int $projectId): void
@@ -599,6 +656,20 @@ function setAccountingProjectDecision(PDO $pdo, int $projectId, string $decision
     if ($projectId <= 0 || !in_array($decision, ['pending', 'approved', 'rejected'], true)) {
         throw new RuntimeException('Choose Pending, Approved, or Rejected.');
     }
+    $current = $pdo->prepare("SELECT accounting_status FROM projects WHERE id = ?");
+    $current->execute([$projectId]);
+    $currentStatus = (string) $current->fetchColumn();
+    if ($currentStatus === '') {
+        throw new RuntimeException('Project not found.');
+    }
+    if (in_array($currentStatus, ['received', 'quoted', 'rejected'], true)) {
+        throw new RuntimeException('Naka-lock na ang status. Hindi na puwedeng baguhin, kahit ibalik sa Pending.');
+    }
+    if (in_array($decision, ['approved', 'rejected'], true) && function_exists('assertNotOwnApproval')) {
+        $owner = $pdo->prepare("SELECT created_by FROM projects WHERE id = ?");
+        $owner->execute([$projectId]);
+        assertNotOwnApproval($owner->fetchColumn());
+    }
 
     if ($decision === 'approved') {
         $stmt = $pdo->prepare("UPDATE projects SET accounting_received_at = COALESCE(accounting_received_at, NOW()), accounting_status = 'received' WHERE id = ? AND accounting_status <> 'received'");
@@ -609,7 +680,7 @@ function setAccountingProjectDecision(PDO $pdo, int $projectId, string $decision
         $pdo->prepare("UPDATE material_requests SET flow_status = 'warehouse' WHERE project_id = ? AND flow_status = 'accounting'")->execute([$projectId]);
         $pdo->prepare("UPDATE purchase_orders po INNER JOIN purchase_requests pr ON pr.id = po.purchase_request_id SET po.status = 'ready_for_warehouse' WHERE pr.project_id = ? AND po.status IN ('sent', 'confirmed')")->execute([$projectId]);
         notifyAccountingReceived($projectId);
-        return 'Project approved. Warehouse can release materials that are already in stock.';
+        return 'Project approved. Naka-lock na ang status.';
     }
 
     if ($decision === 'rejected') {
@@ -620,7 +691,7 @@ function setAccountingProjectDecision(PDO $pdo, int $projectId, string $decision
             return 'This project is already rejected.';
         }
         notifyProjectRejected($projectId);
-        return 'Project rejected. Unreleased materials were returned to Accounting.';
+        return 'Project rejected. Naka-lock na ang status.';
     }
 
     $stmt = $pdo->prepare("UPDATE projects SET accounting_status = 'pending', accounting_received_at = NULL WHERE id = ?");
@@ -657,3 +728,4 @@ function syncDepartmentWorkflow(PDO $pdo): void
 }
 
 require_once __DIR__ . '/../includes/notifications.php';
+require_once __DIR__ . '/../includes/compliance.php';

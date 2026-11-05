@@ -1,6 +1,7 @@
 <?php
 require_once '../../config/database.php';
 require_once '../../includes/auth.php';
+require_once '../../includes/fund_requests.php';
 
 requireDepartment(['engineering']);
 
@@ -36,21 +37,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_accomplishment'])
     } elseif ($stage === 'completed' && ($completionBlock = projectCompletionBlocker($pdo, $project_id))) {
         $_SESSION['error'] = $completionBlock;
     } else {
+        $picStmt = $pdo->prepare("SELECT COALESCE(in_charge_id, assigned_to) FROM projects WHERE id = ?");
+        $picStmt->execute([$project_id]);
+        $stageBlock = projectStageBlocker($pdo, $stage, $picStmt->fetchColumn(), $project_id, $stage === 'completed' ? $pct : null);
+        if ($stageBlock) {
+            $_SESSION['error'] = $stageBlock;
+            header('Location: accomplishments.php');
+            exit();
+        }
         try {
+            assertMonthOpen('engineering', date('Y-m-d'));
             $pdo->beginTransaction();
             $stmt = $pdo->prepare("INSERT INTO accomplishments (project_id, description, completion_percentage, status, created_by) VALUES (?, ?, ?, ?, ?)");
             $stmt->execute([$project_id, $description, $pct, $stage, $_SESSION['user_id']]);
-            $pdo->prepare("UPDATE projects SET status = ? WHERE id = ?")->execute([$stage, $project_id]);
+            applyProjectStatus($pdo, $project_id, $stage);
             $pdo->commit();
             logActivity($_SESSION['user_id'], 'Added accomplishment', 'Projects', "Project ID: $project_id");
             $_SESSION['success'] = 'Accomplishment recorded. Project status is now ' . str_replace('_', ' ', $stage) . ' at ' . number_format($pct, 1) . '%.';
             header('Location: accomplishments.php');
             exit();
-        } catch (PDOException $e) {
+        } catch (Throwable $e) {
             if ($pdo->inTransaction()) {
                 $pdo->rollBack();
             }
-            $error = userDatabaseError($e, 'Projects');
+            $error = $e instanceof PDOException ? userDatabaseError($e, 'Projects') : $e->getMessage();
         }
     }
 }

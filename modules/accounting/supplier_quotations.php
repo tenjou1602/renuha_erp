@@ -40,11 +40,21 @@ try {
         ");
         $stmt->execute([$id]);
         $quotation = $stmt->fetch() ?: null;
+        if ($quotation && !empty($quotation['supplier'])) {
+            $supplierStmt = $pdo->prepare("SELECT id, company_name FROM suppliers WHERE name = ? LIMIT 1");
+            $supplierStmt->execute([$quotation['supplier']]);
+            $supplierMatch = $supplierStmt->fetch() ?: null;
+            if ($supplierMatch) {
+                $quotation['supplier_id'] = $supplierMatch['id'];
+                $quotation['company_name'] = $supplierMatch['company_name'];
+            }
+        }
         if ($quotation) {
             $lineStmt = $pdo->prepare("
-                SELECT qi.quantity, qi.unit, qi.unit_price, m.material_code, m.name AS material_name
+                SELECT qi.id, qi.quantity, qi.unit, qi.unit_price, m.material_code, m.name AS material_name, m.description, pri.remarks
                 FROM quotation_items qi
                 LEFT JOIN materials m ON m.id = qi.material_id
+                LEFT JOIN purchase_request_items pri ON pri.id = qi.purchase_request_item_id
                 WHERE qi.quotation_id = ?
                 ORDER BY qi.id
             ");
@@ -68,7 +78,7 @@ try {
     } else {
         $quotations = $pdo->query("
             SELECT q.id, q.quotation_number, q.purchase_request_id, q.supplier, q.supplier_contact, q.total_amount, q.status, q.submitted_to_accounting_at,
-                   p.project_code, p.name AS project_name,
+                   p.project_code, p.name AS project_name, s.id AS supplier_id, s.company_name,
                    (
                        SELECT e.status
                        FROM purchase_orders po
@@ -86,12 +96,47 @@ try {
                    ) AS po_number
             FROM quotations q
             LEFT JOIN projects p ON p.id = q.project_id
+            LEFT JOIN suppliers s ON s.name = q.supplier
             WHERE q.submitted_to_accounting_at IS NOT NULL
             ORDER BY q.submitted_to_accounting_at DESC
         ")->fetchAll();
     }
 } catch (PDOException $e) {
     $error = userDatabaseError($e, 'Accounting');
+}
+
+function quotationLineLabel(array $line): string
+{
+    $code = trim((string) ($line['material_code'] ?? ''));
+    $name = trim((string) ($line['material_name'] ?? ''));
+    $description = trim((string) ($line['description'] ?? ''));
+    $remarks = trim((string) ($line['remarks'] ?? ''));
+    $label = $code;
+    if ($name !== '') {
+        $label .= ($label !== '' ? ' — ' : '') . $name;
+    }
+    if ($description !== '' && strcasecmp($description, $name) !== 0) {
+        $label .= ($label !== '' ? ' — ' : '') . $description;
+    } elseif ($remarks !== '' && strcasecmp($remarks, $name) !== 0) {
+        $label .= ($label !== '' ? ' — ' : '') . $remarks;
+    }
+    return $label !== '' ? $label : 'Material';
+}
+
+function quotationCompanyHtml(array $row): string
+{
+    $company = trim((string) ($row['supplier_contact'] ?? ''));
+    if ($company === '') {
+        $company = trim((string) ($row['company_name'] ?? ''));
+    }
+    if ($company !== '') {
+        return '<span class="kv-value">' . htmlspecialchars($company) . '</span>';
+    }
+    $html = '<span class="kv-warn">Company name not set</span>';
+    if (!empty($row['supplier_id']) && (isAdmin() || canViewModule('procurement'))) {
+        $html .= ' <a href="' . APP_URL . 'modules/procurement/suppliers.php?action=edit&id=' . (int) $row['supplier_id'] . '">Edit supplier</a>';
+    }
+    return $html;
 }
 
 include '../../includes/header.php';
@@ -118,12 +163,14 @@ include '../../includes/header.php';
     <?php if (!$quotation): ?>
         <p>This quotation has not been sent to Accounting.</p>
     <?php else: ?>
-        <div class="detail-row"><span>Quotation #:</span> <strong><?php echo htmlspecialchars($quotation['quotation_number']); ?></strong></div>
-        <div class="detail-row"><span>Project:</span> <?php echo htmlspecialchars(trim(($quotation['project_code'] ?? '') . ' ' . ($quotation['project_name'] ?? '')) ?: '—'); ?></div>
-        <div class="detail-row"><span>Supplier:</span> <?php echo htmlspecialchars($quotation['supplier']); ?></div>
-        <div class="detail-row"><span>Company Name:</span> <?php echo htmlspecialchars($quotation['supplier_contact'] ?? '') !== '' ? htmlspecialchars($quotation['supplier_contact']) : 'Company name not set'; ?></div>
-        <div class="detail-row"><span>Status:</span> <?php echo ucfirst($quotation['status']); ?></div>
-        <div class="detail-row"><span>Sent:</span> <?php echo date('M d, Y h:i A', strtotime($quotation['submitted_to_accounting_at'])); ?></div>
+        <div class="kv-grid">
+            <div><span class="kv-label">Quotation #</span><strong class="kv-value"><?php echo htmlspecialchars($quotation['quotation_number']); ?></strong></div>
+            <div><span class="kv-label">Project</span><span class="kv-value"><?php echo htmlspecialchars(trim(($quotation['project_code'] ?? '') . ' ' . ($quotation['project_name'] ?? '')) ?: '—'); ?></span></div>
+            <div><span class="kv-label">Supplier</span><span class="kv-value"><?php echo htmlspecialchars($quotation['supplier']); ?></span></div>
+            <div><span class="kv-label">Company Name</span><?php echo quotationCompanyHtml($quotation); ?></div>
+            <div><span class="kv-label">Status</span><span class="badge badge-<?php echo htmlspecialchars($quotation['status']); ?>"><?php echo htmlspecialchars(ucfirst($quotation['status'])); ?></span></div>
+            <div><span class="kv-label">Sent</span><span class="kv-value"><?php echo date('M d, Y h:i A', strtotime($quotation['submitted_to_accounting_at'])); ?></span></div>
+        </div>
         <div class="table-responsive" style="margin-top:1rem;">
             <table class="table">
                 <thead>
@@ -135,7 +182,7 @@ include '../../includes/header.php';
                     <?php endif; ?>
                     <?php foreach ($lines as $line): ?>
                     <tr>
-                        <td><?php echo htmlspecialchars(trim(($line['material_code'] ?? '') . ' ' . ($line['material_name'] ?? '')) ?: '—'); ?></td>
+                        <td><?php echo htmlspecialchars(quotationLineLabel($line)); ?></td>
                         <td><?php echo number_format((float) $line['quantity']); ?></td>
                         <td><?php echo htmlspecialchars($line['unit']); ?></td>
                         <td>₱<?php echo number_format((float) $line['unit_price'], 2); ?></td>
@@ -146,7 +193,7 @@ include '../../includes/header.php';
             </table>
         </div>
         <div class="detail-row"><span>Supplier total:</span> <strong>₱<?php echo number_format((float) $quotation['total_amount'], 2); ?></strong></div>
-        <div class="detail-row"><span>Payment:</span> <?php echo $payment_status === 'paid' ? 'Paid' . ($paid_po_number !== '' ? ' · ' . htmlspecialchars($paid_po_number) : '') : 'Pending'; ?></div>
+        <div class="detail-row"><span>Payment:</span> <?php echo $payment_status === 'paid' ? 'Paid' . ($paid_po_number !== '' ? ' · ' . htmlspecialchars($paid_po_number) : '') : 'Pending'; ?><?php echo $payment_status === 'paid' ? '' : pendingWaitBadge($quotation['submitted_to_accounting_at'] ?? ''); ?></div>
         <?php if ($payment_status !== 'paid' && canWriteDepartmentData('accounting')): ?>
             <form method="POST" style="margin-top:1rem;" onsubmit="return confirm('Mark these materials as paid and send them to Warehouse?');">
                 <input type="hidden" name="mark_quotation_paid" value="1">
@@ -185,25 +232,25 @@ include '../../includes/header.php';
                     <td><strong><?php echo htmlspecialchars($row['quotation_number']); ?></strong></td>
                     <td><?php echo htmlspecialchars(trim(($row['project_code'] ?? '') . ' ' . ($row['project_name'] ?? '')) ?: '—'); ?></td>
                     <td><?php echo htmlspecialchars($row['supplier']); ?></td>
-                    <td><?php echo htmlspecialchars($row['supplier_contact'] ?? '') !== '' ? htmlspecialchars($row['supplier_contact']) : 'Company name not set'; ?></td>
+                    <td><?php echo quotationCompanyHtml($row); ?></td>
                     <td>₱<?php echo number_format((float) $row['total_amount'], 2); ?></td>
                     <td>
                         <?php
-                        $previewStmt = $pdo->prepare("SELECT m.name, qi.quantity, qi.unit FROM quotation_items qi LEFT JOIN materials m ON m.id = qi.material_id WHERE qi.quotation_id = ? ORDER BY qi.id LIMIT 3");
+                        $previewStmt = $pdo->prepare("SELECT m.material_code, m.name AS material_name, m.description, pri.remarks, qi.quantity, qi.unit FROM quotation_items qi LEFT JOIN materials m ON m.id = qi.material_id LEFT JOIN purchase_request_items pri ON pri.id = qi.purchase_request_item_id WHERE qi.quotation_id = ? ORDER BY qi.id LIMIT 3");
                         $previewStmt->execute([(int) $row['id']]);
                         $preview = $previewStmt->fetchAll();
                         $countStmt = $pdo->prepare("SELECT COUNT(*) FROM quotation_items WHERE quotation_id = ?");
                         $countStmt->execute([(int) $row['id']]);
                         $lineCount = (int) $countStmt->fetchColumn();
                         foreach ($preview as $previewLine) {
-                            echo '<div style="font-size:0.8rem;color:#64748b;">' . htmlspecialchars(($previewLine['name'] ?: 'Material') . ' × ' . (int) $previewLine['quantity'] . ' ' . ($previewLine['unit'] ?? '')) . '</div>';
+                            echo '<div class="help-text">' . htmlspecialchars(quotationLineLabel($previewLine) . ' × ' . (int) $previewLine['quantity'] . ' ' . ($previewLine['unit'] ?? '')) . '</div>';
                         }
                         if ($lineCount > count($preview)) {
                             echo '<div style="font-size:0.8rem;color:#94a3b8;">+' . ($lineCount - count($preview)) . ' more</div>';
                         }
                         ?>
                     </td>
-                    <td><?php echo ($row['expense_status'] ?? '') === 'paid' ? 'Paid' : 'Pending'; ?><?php if (!empty($row['po_number'])): ?><div style="font-size:0.8rem;color:#64748b;"><?php echo htmlspecialchars($row['po_number']); ?></div><?php endif; ?></td>
+                    <td><?php echo ($row['expense_status'] ?? '') === 'paid' ? 'Paid' : 'Pending'; ?><?php echo ($row['expense_status'] ?? '') === 'paid' ? '' : pendingWaitBadge($row['submitted_to_accounting_at'] ?? ''); ?><?php if (!empty($row['po_number'])): ?><div style="font-size:0.8rem;color:#64748b;"><?php echo htmlspecialchars($row['po_number']); ?></div><?php endif; ?></td>
                     <td><?php echo date('M d, Y h:i A', strtotime($row['submitted_to_accounting_at'])); ?></td>
                     <td>
                         <a class="btn btn-sm btn-info" href="supplier_quotations.php?action=view&id=<?php echo (int) $row['id']; ?>">View</a>

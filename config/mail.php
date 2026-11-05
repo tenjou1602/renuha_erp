@@ -9,9 +9,15 @@
  * 4. Set RUNEHA_SMTP_PASS to the 16-character App Password
  * 5. Optionally set RUNEHA_SMTP_FROM; it defaults to RUNEHA_SMTP_USER
  *
- * Defaults below match the original Gmail App Password used by this project.
- * Environment variables still override them when set.
+ * Do not put the app password in this file. Set RUNEHA_SMTP_USER, RUNEHA_SMTP_PASS
+ * and RUNEHA_SMTP_FROM in the environment, or in C:\xampp\runeha_mail.php
+ * (outside the web root). That outside file is optional and is not in the project.
  */
+$runehaOutsideMail = dirname(__DIR__, 3) . DIRECTORY_SEPARATOR . 'runeha_mail.php';
+if (is_file($runehaOutsideMail)) {
+    require_once $runehaOutsideMail;
+}
+
 if (!function_exists('mailConfigValue')) {
     function mailConfigValue($name, $default = '') {
         $value = getenv($name);
@@ -23,8 +29,8 @@ if (!function_exists('mailConfigValue')) {
 }
 
 if (!defined('SMTP_HOST')) {
-    $smtpUser = mailConfigValue('RUNEHA_SMTP_USER', 'joramvillanueva02@gmail.com');
-    $smtpPass = preg_replace('/\s+/', '', mailConfigValue('RUNEHA_SMTP_PASS', 'pmfcbkidnvewxjzj'));
+    $smtpUser = mailConfigValue('RUNEHA_SMTP_USER', '');
+    $smtpPass = preg_replace('/\s+/', '', mailConfigValue('RUNEHA_SMTP_PASS', ''));
 
     define('SMTP_HOST', 'smtp.gmail.com');
     define('SMTP_PORT', 587);
@@ -34,6 +40,7 @@ if (!defined('SMTP_HOST')) {
     define('SMTP_FROM_NAME', 'RUNEHA INC. ERP');
     define('SMTP_SECURE', 'tls');
     define('MAIL_DEBUG', false);
+    define('REMINDER_HOURS', (int) (mailConfigValue('RUNEHA_REMINDER_HOURS', '24') ?: 24));
 }
 
 if (!function_exists('isSmtpConfigured')) {

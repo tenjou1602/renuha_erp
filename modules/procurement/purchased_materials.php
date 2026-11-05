@@ -115,10 +115,16 @@ include '../../includes/header.php';
         <a href="materials.php" class="btn btn-info"><i class="fas fa-cubes"></i> View All Materials</a>
         <a href="purchase_history.php" class="btn btn-primary"><i class="fas fa-history"></i> Purchase History</a>
         <a href="reports.php" class="btn btn-outline"><i class="fas fa-chart-bar"></i> Reports</a>
-        <a href="<?php echo APP_URL; ?>modules/warehouse/receive_purchases.php" class="btn btn-success"><i class="fas fa-truck-loading"></i> Send to Warehouse</a>
+        <a href="received_requests.php" class="btn btn-success"><i class="fas fa-truck-loading"></i> Send to Warehouse</a>
     </div>
 </div>
 
+<?php if (!empty($_SESSION['success'])): ?>
+    <div class="alert alert-success"><?php echo htmlspecialchars($_SESSION['success']); unset($_SESSION['success']); ?></div>
+<?php endif; ?>
+<?php if (!empty($_SESSION['error'])): ?>
+    <div class="alert alert-danger"><?php echo htmlspecialchars($_SESSION['error']); unset($_SESSION['error']); ?></div>
+<?php endif; ?>
 <?php if (isset($error)): ?>
     <div class="alert alert-danger"><?php echo htmlspecialchars($error); ?></div>
 <?php endif; ?>

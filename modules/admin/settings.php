@@ -7,6 +7,15 @@ requireAdmin();
 $page_title = 'System Settings';
 
 // Handle settings update
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['send_test_email'])) {
+    require_once '../../includes/mailer.php';
+    $to = trim($_POST['test_email'] ?? '');
+    $ok = sendMail($to, 'RUNEHA test email', mailTemplate('Test email', '<p>SMTP is working for RUNEHA INC. ERP.</p>'));
+    $_SESSION[$ok ? 'success' : 'error'] = $ok ? 'Test email sent.' : 'Test email was not sent. Check config/mail.php and the activity log.';
+    header('Location: settings.php');
+    exit();
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     // Basic settings - in a real system, these would be stored in a settings table
     $settings = [
@@ -41,6 +50,18 @@ include '../../includes/header.php';
 <?php if (isset($_SESSION['success'])): ?>
     <div class="alert alert-success"><?php echo htmlspecialchars($_SESSION['success']); unset($_SESSION['success']); ?></div>
 <?php endif; ?>
+<?php if (isset($_SESSION['error'])): ?>
+    <div class="alert alert-danger"><?php echo htmlspecialchars($_SESSION['error']); unset($_SESSION['error']); ?></div>
+<?php endif; ?>
+
+<div class="card">
+    <h3>Send test email</h3>
+    <p>XAMPP does not deliver PHP mail() by itself. Mail uses PHPMailer and the SMTP values in config/mail.php: host, port, username, app password, and from-address. Set them with environment variables RUNEHA_SMTP_USER, RUNEHA_SMTP_PASS, and RUNEHA_SMTP_FROM. Pending approvals are emailed by reminders.php, which Task Scheduler should run every hour.</p>
+    <form method="post" class="action-row">
+        <input type="email" name="test_email" required placeholder="you@example.com">
+        <button class="btn btn-primary" name="send_test_email" value="1">Send test email</button>
+    </form>
+</div>
 
 <div class="card">
     <h3>General Settings</h3>

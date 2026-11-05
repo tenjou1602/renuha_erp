@@ -2,9 +2,17 @@
 require_once '../../config/database.php';
 require_once '../../includes/auth.php';
 require_once '../../includes/mailer.php';
+require_once '../../includes/quotation_file.php';
+require_once '../../includes/warehouse_release.php';
 
 // Check department access
 requireDepartment(['procurement', 'engineering']);
+
+try {
+    connectUnlinkedProcurementMaterialRequests($pdo);
+} catch (Throwable $e) {
+    error_log('[Runeha ERP] connect warehouse material requests: ' . $e->getMessage());
+}
 
 $page_title = 'Purchase Requests';
 $action = $_GET['action'] ?? 'list';
@@ -32,28 +40,31 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         
         if (empty($errors)) {
             try {
+                assertMonthOpen('procurement', date('Y-m-d'));
                 $pdo->beginTransaction();
                 
                 if (isset($_POST['add_request'])) {
                     $stmt = $pdo->prepare("INSERT INTO purchase_requests (pr_number, project_id, requestor_id, purpose, priority, created_by) VALUES (?, ?, ?, ?, ?, ?)");
                     $stmt->execute([$pr_number, $project_id, $_SESSION['user_id'], $purpose, $priority, $_SESSION['user_id']]);
                     $request_id = $pdo->lastInsertId();
-                    
-                    // Insert items
-                    $item_stmt = $pdo->prepare("INSERT INTO purchase_request_items (purchase_request_id, material_id, quantity, unit, estimated_cost, remarks) VALUES (?, ?, ?, ?, ?, ?)");
-                    $total_amount = 0;
-                    
-                    foreach ($items as $item) {
-                        if (!empty($item['material_id']) && !empty($item['quantity'])) {
-                            $unit = !empty($item['unit']) ? $item['unit'] : 'pcs';
-                            $est_cost = (float)($item['estimated_cost'] ?? 0);
-                            $total = $item['quantity'] * $est_cost;
-                            $item_stmt->execute([$request_id, $item['material_id'], $item['quantity'], $unit, $est_cost, $item['remarks'] ?? '']);
-                            $total_amount += $total;
+                    $excelLines = projectQuotationMaterials($pdo, $project_id);
+                    if ($excelLines) {
+                        $packed = projectExcelLinesForRequest($excelLines);
+                        $total_amount = saveProjectExcelRequestItems($pdo, (int) $request_id, $packed['lines']);
+                    } else {
+                        $item_stmt = $pdo->prepare("INSERT INTO purchase_request_items (purchase_request_id, material_id, quantity, unit, estimated_cost, remarks) VALUES (?, ?, ?, ?, ?, ?)");
+                        $total_amount = 0;
+                        foreach ($items as $item) {
+                            if (!empty($item['material_id']) && !empty($item['quantity'])) {
+                                $unit = !empty($item['unit']) ? $item['unit'] : 'pcs';
+                                $est_cost = (float)($item['estimated_cost'] ?? 0);
+                                $total = $item['quantity'] * $est_cost;
+                                $item_stmt->execute([$request_id, $item['material_id'], $item['quantity'], $unit, $est_cost, $item['remarks'] ?? '']);
+                                $total_amount += $total;
+                            }
                         }
                     }
                     
-                    // Update total amount
                     $pdo->prepare("UPDATE purchase_requests SET total_amount = ? WHERE id = ?")->execute([$total_amount, $request_id]);
                     
                     logActivity($_SESSION['user_id'], 'Created purchase request', 'Procurement', "PR: $pr_number");
@@ -65,26 +76,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     }
                 } else {
                     // Update request
-                    $stmt = $pdo->prepare("UPDATE purchase_requests SET project_id = ?, purpose = ?, priority = ? WHERE id = ?");
-                    $stmt->execute([$project_id, $purpose, $priority, $id]);
-                    
-                    // Delete existing items and re-insert
-                    $pdo->prepare("DELETE FROM purchase_request_items WHERE purchase_request_id = ?")->execute([$id]);
-                    
-                    $item_stmt = $pdo->prepare("INSERT INTO purchase_request_items (purchase_request_id, material_id, quantity, unit, estimated_cost, remarks) VALUES (?, ?, ?, ?, ?, ?)");
-                    $total_amount = 0;
-                    
-                    foreach ($items as $item) {
-                        if (!empty($item['material_id']) && !empty($item['quantity'])) {
-                            $unit = !empty($item['unit']) ? $item['unit'] : 'pcs';
-                            $est_cost = (float)($item['estimated_cost'] ?? 0);
-                            $total = $item['quantity'] * $est_cost;
-                            $item_stmt->execute([$id, $item['material_id'], $item['quantity'], $unit, $est_cost, $item['remarks'] ?? '']);
-                            $total_amount += $total;
+                    $existingProject = $pdo->prepare("SELECT project_id FROM purchase_requests WHERE id = ?");
+                    $existingProject->execute([$id]);
+                    $existingProjectId = (int) $existingProject->fetchColumn();
+                    if (projectQuotationMaterials($pdo, $existingProjectId)) {
+                        $stmt = $pdo->prepare("UPDATE purchase_requests SET purpose = ?, priority = ? WHERE id = ?");
+                        $stmt->execute([$purpose, $priority, $id]);
+                    } else {
+                        $stmt = $pdo->prepare("UPDATE purchase_requests SET project_id = ?, purpose = ?, priority = ? WHERE id = ?");
+                        $stmt->execute([$project_id, $purpose, $priority, $id]);
+                        $pdo->prepare("DELETE FROM purchase_request_items WHERE purchase_request_id = ?")->execute([$id]);
+                        $item_stmt = $pdo->prepare("INSERT INTO purchase_request_items (purchase_request_id, material_id, quantity, unit, estimated_cost, remarks) VALUES (?, ?, ?, ?, ?, ?)");
+                        $total_amount = 0;
+                        foreach ($items as $item) {
+                            if (!empty($item['material_id']) && !empty($item['quantity'])) {
+                                $unit = !empty($item['unit']) ? $item['unit'] : 'pcs';
+                                $est_cost = (float)($item['estimated_cost'] ?? 0);
+                                $total = $item['quantity'] * $est_cost;
+                                $item_stmt->execute([$id, $item['material_id'], $item['quantity'], $unit, $est_cost, $item['remarks'] ?? '']);
+                                $total_amount += $total;
+                            }
                         }
+                        $pdo->prepare("UPDATE purchase_requests SET total_amount = ? WHERE id = ?")->execute([$total_amount, $id]);
                     }
-                    
-                    $pdo->prepare("UPDATE purchase_requests SET total_amount = ? WHERE id = ?")->execute([$total_amount, $id]);
                     
                     logActivity($_SESSION['user_id'], 'Updated purchase request', 'Procurement', "PR: $pr_number");
                     $_SESSION['success'] = "Purchase request updated successfully!";
@@ -93,28 +107,36 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $pdo->commit();
                 header('Location: purchase_requests.php');
                 exit();
-            } catch (PDOException $e) {
-                $pdo->rollBack();
-                $error = userDatabaseError($e);
+            } catch (Throwable $e) {
+                if ($pdo->inTransaction()) {
+                    $pdo->rollBack();
+                }
+                $error = $e instanceof PDOException ? userDatabaseError($e) : $e->getMessage();
             }
         }
     }
     
-    if (isset($_POST['approve_request']) && isManager()) {
+    if (isset($_POST['approve_request']) && (isManager() || isAdmin())) {
         $request_id = (int)$_POST['request_id'];
         $status = $_POST['status'] ?? 'approved';
         $remarks = $_POST['remarks'] ?? '';
         
         try {
+            $owner = $pdo->prepare("SELECT created_by, requestor_id, status FROM purchase_requests WHERE id = ?");
+            $owner->execute([(int) ($_POST['request_id'] ?? 0)]);
+            $ownerRow = $owner->fetch();
+            assertNotOwnApproval($ownerRow['created_by'] ?? ($ownerRow['requestor_id'] ?? 0));
             $stmt = $pdo->prepare("UPDATE purchase_requests SET status = ?, approved_by = ?, approved_at = NOW() WHERE id = ? AND status = 'pending'");
             $stmt->execute([$status, $_SESSION['user_id'], $request_id]);
             
             logActivity($_SESSION['user_id'], "Approved purchase request", 'Procurement', "ID: $request_id, Status: $status");
+            writeAudit($status === 'approved' ? 'Approve request' : 'Reject request', 'Procurement', 'purchase_requests', $request_id, ['status' => 'pending'], ['status' => $status], $remarks);
+            logStatusChange('purchase_requests', $request_id, 'pending', $status);
             $_SESSION['success'] = "Purchase request " . ($status === 'approved' ? 'approved' : 'rejected') . " successfully!";
             header('Location: purchase_requests.php');
             exit();
-        } catch (PDOException $e) {
-            $error = userDatabaseError($e);
+        } catch (Throwable $e) {
+            $error = $e instanceof RuntimeException ? $e->getMessage() : userDatabaseError($e);
         }
     }
 
@@ -218,6 +240,10 @@ if ($action === 'edit' || $action === 'view') {
         $request_items = $items_stmt->fetchAll();
     }
 }
+$excelLocked = false;
+if (!empty($request_details['project_id'])) {
+    $excelLocked = projectQuotationMaterials($pdo, (int) $request_details['project_id']) !== [];
+}
 
 // Admin may view only — block add/edit form routes
 if (($action === 'add' || $action === 'edit') && !canSubmitMaterialRequirement()) {
@@ -272,15 +298,7 @@ include '../../includes/header.php';
                     <?php endforeach; ?>
                 </select>
             </div>
-            <div class="form-group">
-                <label>Priority *</label>
-                <select name="priority" required>
-                    <option value="low" <?php echo ($request_details['priority'] ?? '') == 'low' ? 'selected' : ''; ?>>Low</option>
-                    <option value="medium" <?php echo ($request_details['priority'] ?? '') == 'medium' ? 'selected' : ''; ?>>Medium</option>
-                    <option value="high" <?php echo ($request_details['priority'] ?? '') == 'high' ? 'selected' : ''; ?>>High</option>
-                    <option value="urgent" <?php echo ($request_details['priority'] ?? '') == 'urgent' ? 'selected' : ''; ?>>Urgent</option>
-                </select>
-            </div>
+            <input type="hidden" name="priority" value="<?php echo htmlspecialchars($request_details['priority'] ?? 'medium'); ?>">
         </div>
         <div class="form-group">
             <label>Purpose *</label>
@@ -288,6 +306,25 @@ include '../../includes/header.php';
         </div>
         
         <h4 style="margin: 1.5rem 0 1rem;">Requested Items</h4>
+        <?php if ($excelLocked): ?>
+            <p class="help-text">Materials, quantity, and price come from the project Excel and cannot be edited.</p>
+            <?php if (!empty($request_details['project_id']) && projectQuotationAttachment($pdo, (int) $request_details['project_id'])): ?>
+                <p><a class="btn btn-outline" href="<?php echo htmlspecialchars(projectQuotationDownloadUrl((int) $request_details['project_id'])); ?>"><i class="fas fa-file-excel"></i> Download Excel</a></p>
+            <?php endif; ?>
+            <table class="table">
+                <thead><tr><th>Material</th><th>Quantity</th><th>Unit</th><th>Price</th></tr></thead>
+                <tbody>
+                <?php foreach ($request_items as $item): ?>
+                    <tr>
+                        <td><?php echo htmlspecialchars(trim(($item['material_code'] ? $item['material_code'] . ' — ' : '') . ($item['material_name'] ?? ''))); ?></td>
+                        <td><?php echo number_format((float) $item['quantity'], 2); ?></td>
+                        <td><?php echo htmlspecialchars($item['unit'] ?? 'pcs'); ?></td>
+                        <td>₱<?php echo number_format((float) ($item['estimated_cost'] ?? 0), 2); ?></td>
+                    </tr>
+                <?php endforeach; ?>
+                </tbody>
+            </table>
+        <?php else: ?>
         <div id="items-container">
             <?php if (isset($request_items)): ?>
                 <?php foreach ($request_items as $index => $item): ?>
@@ -364,6 +401,7 @@ include '../../includes/header.php';
             <?php endif; ?>
         </div>
         <button type="button" class="btn btn-info" onclick="addItemRow()"><i class="fas fa-plus"></i> Add Item</button>
+        <?php endif; ?>
         
         <div style="margin-top: 1.5rem;">
             <button type="submit" class="btn btn-primary"><i class="fas fa-save"></i> <?php echo $action === 'add' ? 'Create' : 'Update'; ?> Request</button>
@@ -443,7 +481,6 @@ document.querySelectorAll('.remove-item').forEach(btn => {
         <div class="detail-row"><span>PR Number:</span> <strong><?php echo htmlspecialchars($request_details['pr_number']); ?></strong></div>
         <div class="detail-row"><span>Project:</span> <?php echo htmlspecialchars($request_details['project_name'] ?? 'N/A'); ?></div>
         <div class="detail-row"><span>Requestor:</span> <?php echo htmlspecialchars($request_details['requestor_name']); ?></div>
-        <div class="detail-row"><span>Priority:</span> <span class="badge badge-<?php echo $request_details['priority']; ?>"><?php echo ucfirst($request_details['priority']); ?></span></div>
         <div class="detail-row"><span>Status:</span> <span class="badge badge-<?php echo $request_details['status']; ?>"><?php echo ucfirst($request_details['status']); ?></span></div>
         <div class="detail-row"><span>Total Amount:</span> <strong>₱<?php echo number_format($request_details['total_amount'] ?? 0, 2); ?></strong></div>
         <div class="detail-row"><span>Purpose:</span> <?php echo nl2br(htmlspecialchars($request_details['purpose'])); ?></div>
@@ -490,6 +527,9 @@ document.querySelectorAll('.remove-item').forEach(btn => {
     </table>
     
     <div style="margin-top: 1.5rem;">
+        <?php if (!empty($request_details['project_id']) && projectQuotationAttachment($pdo, (int) $request_details['project_id'])): ?>
+            <a class="btn btn-outline" href="<?php echo htmlspecialchars(projectQuotationDownloadUrl((int) $request_details['project_id'])); ?>"><i class="fas fa-file-excel"></i> Download Excel</a>
+        <?php endif; ?>
         <?php
         $next_quote = null;
         $next_order = null;
@@ -513,7 +553,7 @@ document.querySelectorAll('.remove-item').forEach(btn => {
         <?php elseif ($next_quote && canWriteDepartmentData('procurement')): ?>
             <a href="purchase_orders.php?action=add&quote=<?php echo (int) $next_quote; ?>" class="btn btn-primary"><i class="fas fa-shopping-cart"></i> Create purchase order</a>
         <?php elseif (in_array($request_details['status'], ['approved', 'confirmed'], true) && canWriteDepartmentData('procurement')): ?>
-            <a href="quotations.php?action=add&pr=<?php echo (int) $request_details['id']; ?>" class="btn btn-primary"><i class="fas fa-balance-scale"></i> Compare supplier prices</a>
+            <a href="buying.php?request=<?php echo (int) $request_details['id']; ?>" class="btn btn-primary"><i class="fas fa-balance-scale"></i> Choose supplier</a>
         <?php endif; ?>
         <a href="received_requests.php" class="btn btn-secondary"><i class="fas fa-arrow-left"></i> Back</a>
     </div>
@@ -566,7 +606,6 @@ function closeApproveModal() {
                     <th>Purpose</th>
                     <th>Items</th>
                     <th>Total</th>
-                    <th>Priority</th>
                     <th>Status</th>
                     <th>Actions</th>
                 </tr>
@@ -580,16 +619,28 @@ function closeApproveModal() {
                     <td><?php echo htmlspecialchars(substr($request['purpose'], 0, 50)) . (strlen($request['purpose']) > 50 ? '...' : ''); ?></td>
                     <td><?php echo $request['item_count']; ?></td>
                     <td>₱<?php echo number_format($request['total_amount'] ?? 0, 2); ?></td>
-                    <td><span class="badge badge-<?php echo $request['priority']; ?>"><?php echo ucfirst($request['priority']); ?></span></td>
                     <td><span class="badge badge-<?php echo $request['status']; ?>"><?php echo ucfirst($request['status']); ?></span></td>
                     <td>
                         <a href="?action=view&id=<?php echo $request['id']; ?>" class="btn btn-sm btn-info"><i class="fas fa-eye"></i></a>
-                        <?php if (canWriteDepartmentData('procurement') && $request['status'] === 'draft' && ($_SESSION['user_id'] == $request['requestor_id'] || isManager())): ?>
+                        <?php if (!empty($request['project_id']) && projectQuotationAttachment($pdo, (int) $request['project_id'])): ?>
+                            <a class="btn btn-sm btn-outline" href="<?php echo htmlspecialchars(projectQuotationDownloadUrl((int) $request['project_id'])); ?>">Excel</a>
+                        <?php endif; ?>
+                        <?php if (canWriteDepartmentData('procurement') && $request['status'] === 'draft' && ($_SESSION['user_id'] == $request['requestor_id'] || isManager() || isAdmin())): ?>
                             <a href="?action=edit&id=<?php echo $request['id']; ?>" class="btn btn-sm btn-warning"><i class="fas fa-edit"></i></a>
                         <?php endif; ?>
-                        <?php if (isManager() && $request['status'] === 'pending'): ?>
-                            <button class="btn btn-sm btn-success" onclick="openApproveModal(<?php echo $request['id']; ?>, 'approved')"><i class="fas fa-check"></i></button>
-                            <button class="btn btn-sm btn-danger" onclick="openApproveModal(<?php echo $request['id']; ?>, 'rejected')"><i class="fas fa-times"></i></button>
+                        <?php if ((isManager() || isAdmin()) && $request['status'] === 'pending' && !ownsRecord($request['requestor_id'] ?? 0)): ?>
+                            <form method="POST" style="display:inline;" onsubmit="return confirm('Approve this purchase request?');">
+                                <input type="hidden" name="approve_request" value="1">
+                                <input type="hidden" name="request_id" value="<?php echo (int) $request['id']; ?>">
+                                <input type="hidden" name="status" value="approved">
+                                <button type="submit" class="btn btn-sm btn-success" title="Approve"><i class="fas fa-check"></i></button>
+                            </form>
+                            <form method="POST" style="display:inline;" onsubmit="return confirm('Reject this purchase request?');">
+                                <input type="hidden" name="approve_request" value="1">
+                                <input type="hidden" name="request_id" value="<?php echo (int) $request['id']; ?>">
+                                <input type="hidden" name="status" value="rejected">
+                                <button type="submit" class="btn btn-sm btn-danger" title="Reject"><i class="fas fa-times"></i></button>
+                            </form>
                         <?php endif; ?>
                         <?php if (canConfirmPurchaseRequest($request['status'])): ?>
                             <form method="POST" style="display:inline;" onsubmit="return confirm('Confirm this PR for PO conversion?');">
@@ -599,10 +650,10 @@ function closeApproveModal() {
                             </form>
                         <?php endif; ?>
                         <?php if (in_array($request['status'], ['approved', 'confirmed'], true) && canWriteDepartmentData('procurement')): ?>
-                            <a href="quotations.php?action=add&pr=<?php echo (int) $request['id']; ?>" class="btn btn-sm btn-outline" title="Supplier quote">Quote</a>
+                            <a href="buying.php?request=<?php echo (int) $request['id']; ?>" class="btn btn-sm btn-outline" title="Choose supplier">Supplier</a>
                         <?php endif; ?>
                         <?php if (in_array($request['status'], ['approved', 'confirmed', 'ordered'], true) && canWriteDepartmentData('procurement')): ?>
-                            <a href="purchase_orders.php?action=add&pr=<?php echo (int) $request['id']; ?>" class="btn btn-sm btn-primary" title="Create purchase order">PO</a>
+                            <a href="buying.php?request=<?php echo (int) $request['id']; ?>" class="btn btn-sm btn-primary" title="Create purchase order">PO</a>
                         <?php endif; ?>
                     </td>
                 </tr>

@@ -10,6 +10,12 @@ $current_page = basename($_SERVER['PHP_SELF']);
 $current_module = basename(dirname($_SERVER['PHP_SELF']));
 $is_admin = isAdmin();
 $is_manager = isManager();
+$is_adjustments_page = $current_module === 'adjustments';
+$adjustment_department = $_GET['department'] ?? '';
+if ($is_adjustments_page && !in_array($adjustment_department, ['accounting', 'engineering', 'procurement', 'warehouse', 'admin'], true)) {
+    $adjustment_department = 'admin';
+}
+$is_exec_home = $current_page === 'index.php' && !$is_adjustments_page;
 $show_projects = canViewModule('projects');
 $show_procurement = canViewModule('procurement');
 $show_accounting = canViewModule('accounting');
@@ -18,7 +24,9 @@ $show_warehouse = canViewModule('warehouse');
 
 // Only the section for the current page stays open.
 $expanded_sections = [];
-if ($current_module === 'accounting') {
+if ($is_adjustments_page) {
+    $expanded_sections[] = $adjustment_department === 'engineering' ? 'engineering' : ($adjustment_department === 'admin' ? 'administration' : $adjustment_department);
+} elseif ($current_module === 'accounting') {
     $expanded_sections[] = 'accounting';
 } elseif ($current_module === 'procurement') {
     $expanded_sections[] = 'procurement';
@@ -26,7 +34,7 @@ if ($current_module === 'accounting') {
     $expanded_sections[] = 'warehouse';
 } elseif ($current_module === 'projects' && !($is_admin && $current_page === 'projects.php')) {
     $expanded_sections[] = 'engineering';
-} elseif ($current_module === 'admin' || $current_page === 'index.php' || ($is_admin && $current_page === 'projects.php')) {
+} elseif ($current_module === 'admin' || $is_exec_home || ($is_admin && $current_page === 'projects.php')) {
     $expanded_sections[] = 'administration';
 } elseif ($department === 'engineering') {
     $expanded_sections[] = 'engineering';
@@ -40,11 +48,14 @@ if ($current_module === 'accounting') {
     $expanded_sections[] = 'administration';
 }
 $accounting_new_projects = 0;
+$accounting_fund_requests = 0;
 if ($show_accounting && isset($pdo)) {
     try {
         $accounting_new_projects = (int) $pdo->query("SELECT COUNT(*) FROM projects WHERE accounting_status = 'pending'")->fetchColumn();
+        $accounting_fund_requests = (int) $pdo->query("SELECT COUNT(*) FROM fund_requests WHERE status = 'pending'")->fetchColumn();
     } catch (Throwable $e) {
         $accounting_new_projects = 0;
+        $accounting_fund_requests = 0;
     }
 }
 
@@ -103,13 +114,13 @@ if ($sidebar_width > 400) $sidebar_width = 400;
                 <i class="fas fa-chevron-<?php echo in_array('administration', $expanded_sections) ? 'down' : 'right'; ?> arrow"></i>
             </div>
             <div class="nav-section-content">
-                <a href="<?php echo APP_URL; ?>index.php" class="nav-item <?php echo $current_page === 'index.php' ? 'active' : ''; ?>">
+                <a href="<?php echo APP_URL; ?>index.php" class="nav-item <?php echo $is_exec_home ? 'active' : ''; ?>">
                     <i class="fas fa-tachometer-alt"></i>
                     <span>Dashboard</span>
                 </a>
                 <a href="<?php echo APP_URL; ?>modules/projects/projects.php?action=add" class="nav-item <?php echo $current_module === 'projects' && $current_page === 'projects.php' && in_array(($_GET['action'] ?? ''), ['add', 'edit'], true) ? 'active' : ''; ?>">
                     <i class="fas fa-plus-circle"></i>
-                    <span>Project Management</span>
+                    <span>Create Project</span>
                 </a>
                 <a href="<?php echo APP_URL; ?>modules/accounting/quotations.php" class="nav-item <?php echo $current_module === 'accounting' && $current_page === 'quotations.php' ? 'active' : ''; ?>">
                     <i class="fas fa-file-signature"></i>
@@ -117,7 +128,7 @@ if ($sidebar_width > 400) $sidebar_width = 400;
                 </a>
                 <a href="<?php echo APP_URL; ?>modules/projects/projects.php" class="nav-item <?php echo $current_module === 'projects' && $current_page === 'projects.php' && !in_array(($_GET['action'] ?? ''), ['add', 'edit'], true) ? 'active' : ''; ?>">
                     <i class="fas fa-tasks"></i>
-                    <span>Project Monitoring</span>
+                    <span>Project List</span>
                 </a>
                 <a href="<?php echo APP_URL; ?>modules/admin/department_monitoring.php" class="nav-item <?php echo $current_page === 'department_monitoring.php' ? 'active' : ''; ?>">
                     <i class="fas fa-eye"></i>
@@ -134,6 +145,10 @@ if ($sidebar_width > 400) $sidebar_width = 400;
                 <a href="<?php echo APP_URL; ?>modules/admin/consolidated_reports.php" class="nav-item <?php echo $current_page === 'consolidated_reports.php' ? 'active' : ''; ?>">
                     <i class="fas fa-chart-bar"></i>
                     <span>Consolidated Reports</span>
+                </a>
+                <a href="<?php echo APP_URL; ?>modules/adjustments/index.php?department=admin" class="nav-item <?php echo $is_adjustments_page && $adjustment_department === 'admin' ? 'active' : ''; ?>">
+                    <i class="fas fa-balance-scale"></i>
+                    <span>Monthly Adjustments</span>
                 </a>
             </div>
         </div>
@@ -178,6 +193,21 @@ if ($sidebar_width > 400) $sidebar_width = 400;
                 <a href="<?php echo APP_URL; ?>modules/accounting/expenses.php" class="nav-item <?php echo $current_module === 'accounting' && $current_page === 'expenses.php' ? 'active' : ''; ?>">
                     <i class="fas fa-coins"></i>
                     <span>Expense Management</span>
+                </a>
+                <a href="<?php echo APP_URL; ?>modules/accounting/invoices.php" class="nav-item <?php echo $current_module === 'accounting' && $current_page === 'invoices.php' ? 'active' : ''; ?>">
+                    <i class="fas fa-file-invoice-dollar"></i>
+                    <span>Invoices</span>
+                </a>
+                <a href="<?php echo APP_URL; ?>modules/adjustments/index.php?department=accounting" class="nav-item <?php echo $is_adjustments_page && $adjustment_department === 'accounting' ? 'active' : ''; ?>">
+                    <i class="fas fa-balance-scale"></i>
+                    <span>Monthly Adjustments</span>
+                </a>
+                <a href="<?php echo APP_URL; ?>modules/accounting/fund_requests.php" class="nav-item <?php echo $current_module === 'accounting' && $current_page === 'fund_requests.php' ? 'active' : ''; ?>">
+                    <i class="fas fa-hand-holding-usd"></i>
+                    <span>Fund Requests</span>
+                    <?php if ($accounting_fund_requests > 0): ?>
+                        <span class="nav-badge warning"><?php echo (int) $accounting_fund_requests; ?></span>
+                    <?php endif; ?>
                 </a>
                 <a href="<?php echo APP_URL; ?>modules/accounting/funds_budget.php" class="nav-item <?php echo $current_module === 'accounting' && $current_page === 'funds_budget.php' ? 'active' : ''; ?>">
                     <i class="fas fa-wallet"></i>
@@ -224,10 +254,6 @@ if ($sidebar_width > 400) $sidebar_width = 400;
                     <i class="fas fa-paper-plane"></i>
                     <span>Material Requests</span>
                 </a>
-                <a href="<?php echo APP_URL; ?>modules/projects/project_details.php" class="nav-item <?php echo $current_module === 'projects' && $current_page === 'project_details.php' && (int) ($_GET['id'] ?? 0) > 0 ? 'active' : ''; ?>">
-                    <i class="fas fa-hard-hat"></i>
-                    <span>Project Implementation</span>
-                </a>
                 <a href="<?php echo APP_URL; ?>modules/projects/accomplishments.php" class="nav-item <?php echo $current_module === 'projects' && $current_page === 'accomplishments.php' ? 'active' : ''; ?>">
                     <i class="fas fa-clipboard-check"></i>
                     <span>Progress Updates</span>
@@ -235,6 +261,10 @@ if ($sidebar_width > 400) $sidebar_width = 400;
                 <a href="<?php echo APP_URL; ?>modules/projects/project_reports.php" class="nav-item <?php echo $current_module === 'projects' && $current_page === 'project_reports.php' ? 'active' : ''; ?>">
                     <i class="fas fa-chart-bar"></i>
                     <span>Accomplishment Reports</span>
+                </a>
+                <a href="<?php echo APP_URL; ?>modules/adjustments/index.php?department=engineering" class="nav-item <?php echo $is_adjustments_page && $adjustment_department === 'engineering' ? 'active' : ''; ?>">
+                    <i class="fas fa-balance-scale"></i>
+                    <span>Monthly Adjustments</span>
                 </a>
             </div>
         </div>
@@ -261,17 +291,33 @@ if ($sidebar_width > 400) $sidebar_width = 400;
                     <i class="fas fa-truck"></i>
                     <span>Supplier Management</span>
                 </a>
+                <a href="<?php echo APP_URL; ?>modules/procurement/buying.php" class="nav-item <?php echo $current_module === 'procurement' && $current_page === 'buying.php' ? 'active' : ''; ?>">
+                    <i class="fas fa-file-excel"></i>
+                    <span>Buying</span>
+                </a>
                 <a href="<?php echo APP_URL; ?>modules/procurement/quotations.php" class="nav-item <?php echo $current_module === 'procurement' && $current_page === 'quotations.php' ? 'active' : ''; ?>">
-                    <i class="fas fa-balance-scale"></i>
-                    <span>Price / Supplier Comparison</span>
+                    <i class="fas fa-eye"></i>
+                    <span>Past Quotations</span>
                 </a>
                 <a href="<?php echo APP_URL; ?>modules/procurement/purchase_orders.php" class="nav-item <?php echo $current_module === 'procurement' && ($current_page === 'purchase_orders.php' || $current_page === 'purchase_history.php' || $current_page === 'materials.php') ? 'active' : ''; ?>">
                     <i class="fas fa-shopping-cart"></i>
                     <span>Purchase Management</span>
                 </a>
+                <a href="<?php echo APP_URL; ?>modules/procurement/project_materials.php" class="nav-item <?php echo $current_module === 'procurement' && $current_page === 'project_materials.php' ? 'active' : ''; ?>">
+                    <i class="fas fa-layer-group"></i>
+                    <span>Project Materials</span>
+                </a>
+                <a href="<?php echo APP_URL; ?>modules/procurement/invoices.php" class="nav-item <?php echo $current_module === 'procurement' && $current_page === 'invoices.php' ? 'active' : ''; ?>">
+                    <i class="fas fa-file-invoice-dollar"></i>
+                    <span>Invoices</span>
+                </a>
                 <a href="<?php echo APP_URL; ?>modules/procurement/reports.php?report=costs" class="nav-item <?php echo $current_module === 'procurement' && $current_page === 'reports.php' ? 'active' : ''; ?>">
-                    <i class="fas fa-coins"></i>
-                    <span>Purchase Costs</span>
+                    <i class="fas fa-chart-bar"></i>
+                    <span>Procurement Reports</span>
+                </a>
+                <a href="<?php echo APP_URL; ?>modules/procurement/audit_report.php" class="nav-item <?php echo $current_module === 'procurement' && $current_page === 'audit_report.php' ? 'active' : ''; ?>">
+                    <i class="fas fa-clipboard-list"></i>
+                    <span>Audit Report</span>
                 </a>
                 <a href="<?php echo APP_URL; ?>modules/accounting/purchase_costs.php" class="nav-item <?php echo $current_page === 'purchase_costs.php' ? 'active' : ''; ?>">
                     <i class="fas fa-link"></i>
@@ -318,9 +364,13 @@ if ($sidebar_width > 400) $sidebar_width = 400;
                     <i class="fas fa-arrow-up"></i>
                     <span>Stock-Out</span>
                 </a>
+                <a href="<?php echo APP_URL; ?>modules/adjustments/index.php?department=warehouse" class="nav-item <?php echo $is_adjustments_page && $adjustment_department === 'warehouse' ? 'active' : ''; ?>">
+                    <i class="fas fa-balance-scale"></i>
+                    <span>Monthly Adjustments</span>
+                </a>
                 <a href="<?php echo APP_URL; ?>modules/warehouse/inventory_reports.php" class="nav-item <?php echo $current_module === 'warehouse' && in_array($current_page, ['inventory_reports.php', 'inventory_history.php', 'movements.php'], true) ? 'active' : ''; ?>">
                     <i class="fas fa-chart-bar"></i>
-                    <span>Inventory Reports</span>
+                    <span>Warehouse Reports</span>
                 </a>
             </div>
         </div>
@@ -343,23 +393,22 @@ if ($sidebar_width > 400) $sidebar_width = 400;
    SIDEBAR - ORIGINAL COLORS WITH RESIZE
    ============================================ */
 
-/* Sidebar - Original Dark Navy */
+/* Sidebar - one light shell for every department */
 .sidebar {
     position: fixed;
     left: 0;
     top: 0;
     height: 100vh;
-    background: linear-gradient(180deg, #1e2a3a 0%, #0f172a 100%);
-    color: #fff;
+    max-height: 100vh;
+    background: #ffffff;
+    color: #1e293b;
     z-index: 1000;
-    overflow-y: auto;
-    overflow-x: hidden;
+    overflow: hidden;
     transition: none;
     display: flex;
     flex-direction: column;
-    scrollbar-width: thin;
-    scrollbar-color: rgba(255,255,255,0.2) transparent;
-    box-shadow: 2px 0 20px rgba(0,0,0,0.1);
+    border-right: 1px solid #eef2f6;
+    box-shadow: none;
 }
 
 .sidebar::-webkit-scrollbar {
@@ -369,7 +418,7 @@ if ($sidebar_width > 400) $sidebar_width = 400;
     background: transparent;
 }
 .sidebar::-webkit-scrollbar-thumb {
-    background: rgba(255,255,255,0.2);
+    background: #e2e8f0;
     border-radius: 2px;
 }
 
@@ -399,7 +448,8 @@ if ($sidebar_width > 400) $sidebar_width = 400;
     flex-direction: column;
     gap: 4px;
     padding: 4px;
-    background: rgba(255,255,255,0.1);
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
     border-radius: 4px;
 }
 
@@ -407,7 +457,7 @@ if ($sidebar_width > 400) $sidebar_width = 400;
     display: block;
     width: 3px;
     height: 3px;
-    background: rgba(255,255,255,0.5);
+    background: #94a3b8;
     border-radius: 50%;
 }
 
@@ -418,8 +468,8 @@ if ($sidebar_width > 400) $sidebar_width = 400;
 
 /* Brand - Original */
 .sidebar-brand {
-    padding: 1rem 1.4rem 0.9rem;
-    border-bottom: 1px solid rgba(255,255,255,0.1);
+    padding: 1rem 1.1rem 0.9rem;
+    border-bottom: 1px solid #eef2f6;
     display: flex;
     align-items: center;
     gap: 12px;
@@ -437,14 +487,16 @@ if ($sidebar_width > 400) $sidebar_width = 400;
     height: auto;
     display: block;
     object-fit: contain;
-    filter: drop-shadow(0 6px 16px rgba(0,0,0,0.25));
+    background: #0f172a;
+    border-radius: 12px;
+    padding: 8px 10px;
 }
 
 .sidebar-toggle {
     display: none;
     background: none;
     border: none;
-    color: #fff;
+    color: #334155;
     font-size: 1.2rem;
     cursor: pointer;
     padding: 4px;
@@ -453,8 +505,8 @@ if ($sidebar_width > 400) $sidebar_width = 400;
 
 /* Sidebar User Profile - Original */
 .sidebar-user {
-    padding: 0.8rem 1.8rem;
-    border-bottom: 1px solid rgba(255,255,255,0.1);
+    padding: 0.85rem 1.2rem;
+    border-bottom: 1px solid #eef2f6;
     display: flex;
     align-items: center;
     gap: 12px;
@@ -464,24 +516,24 @@ if ($sidebar_width > 400) $sidebar_width = 400;
     width: 38px;
     height: 38px;
     border-radius: 50%;
-    background: rgba(255,255,255,0.1);
+    background: #fff7e8;
     display: flex;
     align-items: center;
     justify-content: center;
     font-size: 1.2rem;
-    color: #facc15;
+    color: #d97706;
     flex-shrink: 0;
 }
 
 .sidebar-user .user-info .name {
-    font-weight: 600;
+    font-weight: 700;
     font-size: 0.9rem;
-    color: #fff;
+    color: #0f172a;
 }
 
 .sidebar-user .user-info .role {
-    font-size: 0.65rem;
-    color: rgba(255,255,255,0.5);
+    font-size: 0.8125rem;
+    color: #64748b;
     display: flex;
     align-items: center;
     gap: 6px;
@@ -491,7 +543,7 @@ if ($sidebar_width > 400) $sidebar_width = 400;
 .sidebar-user .user-info .role .badge {
     padding: 1px 8px;
     border-radius: 10px;
-    font-size: 0.55rem;
+    font-size: 0.8125rem;
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.3px;
@@ -499,15 +551,30 @@ if ($sidebar_width > 400) $sidebar_width = 400;
 
 .badge-admin { background: #e74a3b; color: #fff; }
 .badge-manager { background: #f59e0b; color: #0f172a; }
-.badge-staff { background: rgba(255,255,255,0.15); color: #fff; }
+.badge-staff { background: #f1f5f9; color: #334155; }
 
 /* Navigation - Original */
 .sidebar-nav {
-    flex: 1;
+    flex: 1 1 auto;
+    min-height: 0;
     padding: 0.3rem 0 0.5rem;
     display: flex;
     flex-direction: column;
+    overflow-x: hidden;
     overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: #94a3b8 #f1f5f9;
+}
+
+.sidebar-nav::-webkit-scrollbar {
+    width: 8px;
+}
+.sidebar-nav::-webkit-scrollbar-track {
+    background: #f1f5f9;
+}
+.sidebar-nav::-webkit-scrollbar-thumb {
+    background: #94a3b8;
+    border-radius: 8px;
 }
 
 .nav-section {
@@ -515,11 +582,11 @@ if ($sidebar_width > 400) $sidebar_width = 400;
 }
 
 .nav-label {
-    font-size: 0.6rem;
+    font-size: 0.75rem;
     text-transform: uppercase;
-    letter-spacing: 0.8px;
-    color: rgba(255,255,255,0.3);
-    padding: 0.6rem 1.8rem 0.3rem;
+    letter-spacing: 0.08em;
+    color: #94a3b8;
+    padding: 0.7rem 1.3rem 0.25rem;
     font-weight: 700;
 }
 
@@ -528,32 +595,34 @@ if ($sidebar_width > 400) $sidebar_width = 400;
     display: flex;
     align-items: center;
     gap: 12px;
-    padding: 0.45rem 1.8rem;
-    color: rgba(255,255,255,0.7);
+    margin: 2px 12px;
+    padding: 0.55rem 0.85rem;
+    border-radius: 12px;
+    color: #64748b;
     cursor: pointer;
-    transition: all 0.3s ease;
+    transition: background 0.15s ease, color 0.15s ease;
     font-size: 0.85rem;
-    font-weight: 500;
+    font-weight: 700;
     user-select: none;
 }
 
 .nav-section-header:hover {
-    background: rgba(255,255,255,0.05);
-    color: #fff;
+    background: #f8fafc;
+    color: #0f172a;
 }
 
 .nav-section-header i:first-child {
     width: 20px;
     text-align: center;
     font-size: 0.9rem;
-    color: rgba(255,255,255,0.4);
+    color: #94a3b8;
 }
 
 .nav-section-header .arrow {
     margin-left: auto;
-    font-size: 0.65rem;
+    font-size: 0.75rem;
     transition: transform 0.3s ease;
-    color: rgba(255,255,255,0.3);
+    color: #94a3b8;
 }
 
 .nav-section.expanded .nav-section-header .arrow {
@@ -573,39 +642,45 @@ if ($sidebar_width > 400) $sidebar_width = 400;
 }
 
 .nav-section.expanded .nav-section-content {
-    max-height: 500px;
+    max-height: none;
+    overflow: visible;
 }
 
 .nav-section-content .nav-item {
-    padding-left: 3.5rem;
-    font-size: 0.78rem;
-    padding-top: 0.3rem;
-    padding-bottom: 0.3rem;
+    padding-left: 2.35rem;
+    font-size: 0.875rem;
+    padding-top: 0.45rem;
+    padding-bottom: 0.45rem;
 }
 
-/* Nav Items - Original */
 .nav-item {
     display: flex;
     align-items: center;
     gap: 12px;
-    padding: 0.4rem 1.8rem;
-    color: rgba(255,255,255,0.6);
+    margin: 2px 12px;
+    padding: 0.5rem 0.85rem;
+    color: #475569;
     text-decoration: none;
-    transition: all 0.3s ease;
-    font-size: 0.85rem;
-    border-left: 3px solid transparent;
+    transition: background 0.15s ease, color 0.15s ease;
+    font-size: 0.9rem;
+    border-radius: 12px;
+    border-left: 0;
     cursor: pointer;
 }
 
 .nav-item:hover {
-    background: rgba(255,255,255,0.05);
-    color: #fff;
+    background: #f8fafc;
+    color: #0f172a;
 }
 
 .nav-item.active {
-    background: rgba(251,191,36,0.12);
-    color: #facc15;
-    border-left-color: #fbbf24;
+    background: #f3f4f6;
+    color: #111827;
+    font-weight: 700;
+}
+
+.nav-item.active i {
+    color: #d97706;
 }
 
 .nav-item i {
@@ -619,7 +694,7 @@ if ($sidebar_width > 400) $sidebar_width = 400;
     margin-left: auto;
     background: #e74a3b;
     color: #fff;
-    font-size: 0.55rem;
+    font-size: 0.8125rem;
     padding: 1px 8px;
     border-radius: 10px;
     font-weight: 600;
@@ -633,7 +708,7 @@ if ($sidebar_width > 400) $sidebar_width = 400;
 /* Push logout to bottom */
 .nav-section:last-of-type {
     margin-top: auto;
-    border-top: 1px solid rgba(255,255,255,0.06);
+    border-top: 1px solid #eef2f6;
     padding-top: 0.3rem;
 }
 
@@ -644,9 +719,9 @@ if ($sidebar_width > 400) $sidebar_width = 400;
     top: 0.8rem;
     left: 0.8rem;
     z-index: 1001;
-    background: #1a1a2e;
-    color: #fff;
-    border: none;
+    background: #ffffff;
+    color: #1e293b;
+    border: 1px solid #e8edf3;
     border-radius: 8px;
     padding: 0.5rem 0.8rem;
     font-size: 1.1rem;

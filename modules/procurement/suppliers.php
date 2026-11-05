@@ -78,14 +78,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if (isset($_POST['add_supplier'])) {
                     $stmt = $pdo->prepare("INSERT INTO suppliers (name, company_name, phone, email, address, tin_number, status, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
                     $stmt->execute([$name, $company_name, $phone, $email, $address, $tin_number, $status, $_SESSION['user_id']]);
-                    
+                    $newSupplierId = (int) $pdo->lastInsertId();
                     logActivity($_SESSION['user_id'], 'Created supplier', 'Procurement', "Supplier: $name");
+                    writeAudit('Create supplier', 'Procurement', 'suppliers', $newSupplierId, null, ['name' => $name, 'company_name' => $company_name], null);
                     $_SESSION['success'] = "Supplier created successfully!";
                 } else {
                     $stmt = $pdo->prepare("UPDATE suppliers SET name = ?, company_name = ?, phone = ?, email = ?, address = ?, tin_number = ?, status = ? WHERE id = ?");
                     $stmt->execute([$name, $company_name, $phone, $email, $address, $tin_number, $status, $id]);
                     
                     logActivity($_SESSION['user_id'], 'Updated supplier', 'Procurement', "Supplier: $name");
+                    writeAudit('Edit supplier', 'Procurement', 'suppliers', (int) $id, null, ['name' => $name, 'company_name' => $company_name, 'status' => $status], null);
                     $_SESSION['success'] = "Supplier updated successfully!";
                 }
                 header('Location: suppliers.php');
@@ -101,9 +103,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 // Get suppliers
 $suppliers = [];
+$quoteStatus = [];
 try {
     $query = "SELECT * FROM suppliers ORDER BY created_at DESC";
     $suppliers = $pdo->query($query)->fetchAll();
+    $quoteStatus = [];
+    try {
+        $statusRows = $pdo->query("SELECT supplier_id, MAX(version_no) AS version_no, COUNT(*) AS uploads FROM supplier_price_uploads GROUP BY supplier_id")->fetchAll();
+        foreach ($statusRows as $statusRow) {
+            $quoteStatus[(int) $statusRow['supplier_id']] = (int) $statusRow['version_no'] > 0 ? 'Version ' . (int) $statusRow['version_no'] : 'Uploaded';
+        }
+    } catch (Throwable $e) {
+        $quoteStatus = [];
+    }
 } catch (PDOException $e) {
     $error = userDatabaseError($e);
 }
@@ -289,13 +301,14 @@ include '../../includes/header.php';
                     <th onclick="sortTable('supplierTable', 2)" style="cursor:pointer;">Phone <i class="fas fa-sort"></i></th>
                     <th onclick="sortTable('supplierTable', 3)" style="cursor:pointer;">Email <i class="fas fa-sort"></i></th>
                     <th onclick="sortTable('supplierTable', 4)" style="cursor:pointer;">Status <i class="fas fa-sort"></i></th>
+                    <th>Latest quotation</th>
                     <th>Actions</th>
                 </tr>
             </thead>
             <tbody>
                 <?php if (empty($suppliers)): ?>
                     <tr>
-                        <td colspan="6" style="text-align:center;color:#94a3b8;padding:2rem;">
+                        <td colspan="8" style="text-align:center;color:#94a3b8;padding:2rem;">
                             <i class="fas fa-truck" style="font-size:2rem;display:block;margin-bottom:0.5rem;opacity:0.3;"></i>
                             No suppliers found. Click "New Supplier" to create one.
                         </td>
@@ -308,9 +321,11 @@ include '../../includes/header.php';
                         <td><?php echo htmlspecialchars($supplier['phone'] ?? 'N/A'); ?></td>
                         <td><?php echo htmlspecialchars($supplier['email'] ?? 'N/A'); ?></td>
                         <td><span class="badge badge-<?php echo ($supplier['status'] ?? 'active') == 'active' ? 'success' : 'secondary'; ?>"><?php echo ucfirst($supplier['status'] ?? 'Active'); ?></span></td>
+                        <td><?php echo htmlspecialchars($quoteStatus[(int) $supplier['id']] ?? 'Not uploaded'); ?></td>
                         <td>
                             <div style="display:flex; gap:0.3rem; flex-wrap:wrap;">
                                 <a href="?action=view&id=<?php echo $supplier['id']; ?>" class="btn btn-sm btn-info" title="View"><i class="fas fa-eye"></i></a>
+                                <a href="buying.php" class="btn btn-sm btn-outline" title="Compare">Compare</a>
                                 <?php if (canWriteDepartmentData('procurement')): ?><a href="?action=edit&id=<?php echo $supplier['id']; ?>" class="btn btn-sm btn-warning" title="Edit"><i class="fas fa-edit"></i></a><?php endif; ?>
                                 <?php if (canDelete('procurement')): ?><a href="?action=delete&delete_id=<?php echo $supplier['id']; ?>" class="btn btn-sm btn-danger" title="Delete" onclick="return confirm('Delete this supplier?')"><i class="fas fa-trash"></i></a><?php endif; ?>
                             </div>

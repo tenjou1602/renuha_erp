@@ -36,6 +36,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         
         if (empty($errors)) {
             try {
+                assertMonthOpen('accounting', $expense_date);
                 if (isset($_POST['add_expense'])) {
                     $stmt = $pdo->prepare("INSERT INTO expenses (expense_number, project_id, category, description, amount, expense_date, payment_method, reference_number, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
                     $stmt->execute([$expense_number, $project_id, $category, $description, $amount, $expense_date, $payment_method, $reference_number, $_SESSION['user_id']]);
@@ -51,8 +52,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
                 header('Location: expenses.php');
                 exit();
-            } catch (PDOException $e) {
-                $error = userDatabaseError($e);
+            } catch (Throwable $e) {
+                $error = $e instanceof PDOException ? userDatabaseError($e) : $e->getMessage();
             }
         }
     }
@@ -66,12 +67,15 @@ if (isset($_GET['delete_id']) && $action === 'delete') {
     }
     $delete_id = (int) $_GET['delete_id'];
     try {
+        $dated = $pdo->prepare("SELECT expense_date FROM expenses WHERE id = ?");
+        $dated->execute([$delete_id]);
+        assertMonthOpen('accounting', $dated->fetchColumn() ?: null);
         $stmt = $pdo->prepare("DELETE FROM expenses WHERE id = ?");
         $stmt->execute([$delete_id]);
         logActivity($_SESSION['user_id'], 'Deleted expense', 'Accounting', "Expense ID: $delete_id");
         $_SESSION['success'] = 'Expense deleted.';
-    } catch (PDOException $e) {
-        $_SESSION['error'] = userDatabaseError($e);
+    } catch (Throwable $e) {
+        $_SESSION['error'] = $e instanceof PDOException ? userDatabaseError($e) : $e->getMessage();
     }
     header('Location: expenses.php');
     exit();
@@ -84,12 +88,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mark_paid'])) {
         exit();
     }
     $paidId = (int) ($_POST['expense_id'] ?? 0);
+    $ownerStmt = $pdo->prepare("SELECT created_by, expense_date FROM expenses WHERE id = ?");
+    $ownerStmt->execute([$paidId]);
+    $ownerRow = $ownerStmt->fetch();
+    try {
+        assertNotOwnApproval($ownerRow['created_by'] ?? 0);
+        assertMonthOpen('accounting', $ownerRow['expense_date'] ?? null);
+    } catch (RuntimeException $e) {
+        $_SESSION['error'] = $e->getMessage();
+        header('Location: expenses.php?action=view&id=' . $paidId);
+        exit();
+    }
     $method = trim($_POST['payment_method'] ?? '');
     $reference = trim($_POST['reference_number'] ?? '');
     $stmt = $pdo->prepare("UPDATE expenses SET status = 'paid', paid_by = ?, paid_at = NOW(), payment_method = COALESCE(NULLIF(?, ''), payment_method), reference_number = COALESCE(NULLIF(?, ''), reference_number) WHERE id = ? AND status = 'pending'");
     $stmt->execute([(int) $_SESSION['user_id'], $method, $reference, $paidId]);
     if ($stmt->rowCount() === 1) {
         releasePaidOrderToWarehouse($pdo, $paidId);
+        logStatusChange('expenses', $paidId, 'pending', 'paid');
         $_SESSION['success'] = 'Expense marked as paid. Warehouse can now receive the materials on this purchase order.';
     } else {
         $_SESSION['error'] = 'Only a pending expense can be marked as paid.';
@@ -99,8 +115,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mark_paid'])) {
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['reopen_expense'])) {
-    if (!isManager() || ($_SESSION['department'] ?? '') !== 'accounting') {
-        $_SESSION['error'] = 'Only an Accounting manager can return a paid expense to pending.';
+    if (!isAdmin() && (!isManager() || ($_SESSION['department'] ?? '') !== 'accounting')) {
+        $_SESSION['error'] = 'Only an Accounting manager or Admin can return a paid expense to pending.';
         header('Location: expenses.php');
         exit();
     }
@@ -108,6 +124,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['reopen_expense'])) {
     $reason = trim($_POST['status_note'] ?? '');
     if ($reason === '') {
         $_SESSION['error'] = 'A reason is required to return a paid expense to pending.';
+        header('Location: expenses.php?action=view&id=' . $paidId);
+        exit();
+    }
+    $dated = $pdo->prepare("SELECT expense_date FROM expenses WHERE id = ?");
+    $dated->execute([$paidId]);
+    try {
+        assertMonthOpen('accounting', $dated->fetchColumn() ?: null);
+    } catch (RuntimeException $e) {
+        $_SESSION['error'] = $e->getMessage();
         header('Location: expenses.php?action=view&id=' . $paidId);
         exit();
     }
@@ -282,7 +307,7 @@ include '../../includes/header.php';
         <div class="detail-row"><span>Category:</span> <?php echo htmlspecialchars($expense_details['category']); ?></div>
         <div class="detail-row"><span>Amount:</span> <strong>₱<?php echo number_format($expense_details['amount'], 2); ?></strong></div>
         <div class="detail-row"><span>Project:</span> <?php echo htmlspecialchars($expense_details['project_name'] ?? 'N/A'); ?></div>
-        <div class="detail-row"><span>Status:</span> <span class="badge badge-<?php echo $expense_details['status'] === 'paid' ? 'success' : ($expense_details['status'] === 'pending' ? 'warning' : 'secondary'); ?>"><?php echo ucfirst($expense_details['status']); ?></span></div>
+        <div class="detail-row"><span>Status:</span> <span class="badge badge-<?php echo $expense_details['status'] === 'paid' ? 'success' : ($expense_details['status'] === 'pending' ? 'warning' : 'secondary'); ?>"><?php echo ucfirst($expense_details['status']); ?></span><?php echo ($expense_details['status'] ?? '') === 'pending' ? pendingWaitBadge($expense_details['created_at'] ?? '') : ''; ?></div>
         <?php if (!empty($expense_details['paid_at'])): ?>
         <div class="detail-row"><span>Paid at:</span> <?php echo date('M d, Y h:i A', strtotime($expense_details['paid_at'])); ?></div>
         <?php endif; ?>
@@ -324,7 +349,7 @@ include '../../includes/header.php';
                 <input type="hidden" name="expense_id" value="<?php echo (int) $expense_details['id']; ?>">
                 <button type="submit" class="btn btn-success">Mark as Paid</button>
             </form>
-        <?php elseif ($expense_details['status'] === 'paid' && isManager() && ($_SESSION['department'] ?? '') === 'accounting'): ?>
+        <?php elseif ($expense_details['status'] === 'paid' && (isAdmin() || (isManager() && ($_SESSION['department'] ?? '') === 'accounting'))): ?>
             <form method="POST" style="display:inline-flex;gap:.4rem;align-items:center;" onsubmit="return confirm('Return this paid expense to pending?');">
                 <input type="hidden" name="reopen_expense" value="1">
                 <input type="hidden" name="expense_id" value="<?php echo (int) $expense_details['id']; ?>">
@@ -373,7 +398,7 @@ include '../../includes/header.php';
                         <td><?php echo htmlspecialchars($exp['category']); ?></td>
                         <td><?php echo htmlspecialchars($exp['project_name'] ?? 'N/A'); ?></td>
                         <td>₱<?php echo number_format($exp['amount'], 2); ?></td>
-                        <td><span class="badge badge-<?php echo $exp['status'] === 'paid' ? 'success' : ($exp['status'] === 'pending' ? 'warning' : 'secondary'); ?>"><?php echo ucfirst($exp['status']); ?></span></td>
+                        <td><span class="badge badge-<?php echo $exp['status'] === 'paid' ? 'success' : ($exp['status'] === 'pending' ? 'warning' : 'secondary'); ?>"><?php echo ucfirst($exp['status']); ?></span><?php echo $exp['status'] === 'pending' ? pendingWaitBadge($exp['created_at']) : ''; ?></td>
                         <td><?php echo date('M d, Y', strtotime($exp['created_at'])); ?></td>
                         <td>
                             <a href="?action=view&id=<?php echo $exp['id']; ?>" class="btn btn-sm btn-info"><i class="fas fa-eye"></i></a>

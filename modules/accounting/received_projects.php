@@ -88,23 +88,27 @@ include '../../includes/header.php';
                             $decision = 'approved';
                         }
                         ?>
-                        <?php if (canWriteDepartmentData('accounting')): ?>
+                        <?php if ($decision === 'approved' || $decision === 'rejected'): ?>
+                            <?php echo accountingDecisionView($decision); ?>
+                            <small style="display:block;color:#64748b;margin-top:0.35rem;"><?php echo $decision === 'approved' ? 'Approved' : 'Rejected'; ?>. Status is locked.</small>
+                        <?php elseif (canWriteDepartmentData('accounting')): ?>
                             <form method="POST" style="display:flex;gap:0.25rem;flex-wrap:wrap;">
                                 <input type="hidden" name="set_accounting_decision" value="1">
                                 <input type="hidden" name="project_id" value="<?php echo (int) $project['id']; ?>">
-                                <button type="submit" name="decision" value="pending" class="btn btn-sm <?php echo $decision === 'pending' ? 'btn-warning' : 'btn-outline'; ?>">Pending</button>
-                                <button type="submit" name="decision" value="approved" class="btn btn-sm <?php echo $decision === 'approved' ? 'btn-success' : 'btn-outline'; ?>">Approved</button>
-                                <button type="submit" name="decision" value="rejected" class="btn btn-sm <?php echo $decision === 'rejected' ? 'btn-danger' : 'btn-outline'; ?>" onclick="return confirm('Reject this project?');">Rejected</button>
+                                <button type="submit" name="decision" value="pending" class="btn btn-sm btn-warning">Pending</button>
+                                <button type="submit" name="decision" value="approved" class="btn btn-sm btn-outline" onclick="return confirm('Approve this project? The status cannot be changed after this.');">Approved</button>
+                                <button type="submit" name="decision" value="rejected" class="btn btn-sm btn-outline" onclick="return confirm('Reject this project? The status cannot be changed after this.');">Rejected</button>
                             </form>
                         <?php else: ?>
                             <?php echo accountingDecisionView($decision); ?>
                         <?php endif; ?>
+                        <?php echo $decision === 'pending' ? pendingWaitBadge($project['created_at'] ?? '') : ''; ?>
                     </td>
                     <td style="white-space:nowrap;">
                         <?php if (!empty($project['quotation_path'])): ?>
-                            <a class="btn btn-sm btn-outline" target="_blank" href="<?php echo APP_URL . htmlspecialchars($project['quotation_path']); ?>">View file</a>
+                            <a class="btn btn-sm btn-outline" href="<?php echo APP_URL; ?>modules/projects/quotation_download.php?project_id=<?php echo (int) $project['id']; ?>"><i class="fas fa-file-excel"></i> Download Excel</a>
                         <?php endif; ?>
-                        <a class="btn btn-sm btn-primary" href="quotations.php?action=add&project=<?php echo (int) $project['id']; ?>">Quotation</a>
+                        <a class="btn btn-sm btn-primary" href="quotations.php?action=view&project=<?php echo (int) $project['id']; ?>">Quotation</a>
                         <a class="btn btn-sm btn-outline" href="contracts.php?action=add&project=<?php echo (int) $project['id']; ?>">Contract</a>
                         <a class="btn btn-sm btn-outline" href="labor_budget.php?action=add&project=<?php echo (int) $project['id']; ?>">Labor</a>
                         <a class="btn btn-sm btn-outline" href="funds_budget.php?action=add&project=<?php echo (int) $project['id']; ?>">Funds</a>

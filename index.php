@@ -49,7 +49,7 @@ try {
     // Project Statistics
     $stats['active_projects'] = $pdo->query("SELECT COUNT(*) FROM projects WHERE status IN ('planning', 'ongoing')")->fetchColumn() ?? 0;
     $stats['total_project_amount'] = $pdo->query("SELECT COALESCE(SUM(estimated_budget), 0) FROM projects")->fetchColumn() ?? 0;
-    $stats['total_project_expenses'] = $pdo->query("SELECT COALESCE(SUM(actual_cost), 0) FROM v_project_costs")->fetchColumn() ?? 0;
+    $stats['total_project_expenses'] = reportedActualCost((float) ($pdo->query("SELECT COALESCE(SUM(actual_cost), 0) FROM v_project_costs")->fetchColumn() ?? 0));
     
     // Financial Statistics
     try {
@@ -143,7 +143,7 @@ try {
     } catch (PDOException $e) {
         $items_needing_attention['unassigned_pic'] = 0;
     }
-    $items_needing_attention['overdue_projects'] = $pdo->query("SELECT COUNT(*) FROM projects WHERE end_date < CURDATE() AND status IN ('planning', 'ongoing')")->fetchColumn() ?? 0;
+    $items_needing_attention['overdue_projects'] = $pdo->query("SELECT COUNT(*) FROM projects WHERE end_date IS NOT NULL AND end_date < CURDATE() AND status IN ('planning', 'ongoing')")->fetchColumn() ?? 0;
     
     // Recent Accomplishments
     try {
@@ -174,9 +174,9 @@ try {
     $stats['completed_projects'] = $pdo->query("SELECT COUNT(*) FROM projects WHERE status = 'completed'")->fetchColumn() ?? 0;
     $stats['pending_pos'] = $pdo->query("SELECT COUNT(*) FROM purchase_orders WHERE status IN ('draft', 'sent', 'confirmed')")->fetchColumn() ?? 0;
     $stats['pending_invoices'] = $pdo->query("SELECT COUNT(*) FROM invoices WHERE status IN ('sent', 'partial')")->fetchColumn() ?? 0;
-    $stats['total_projects'] = $pdo->query("SELECT COUNT(*) FROM projects")->fetchColumn() ?? 0;
+    $stats['total_projects'] = $pdo->query("SELECT COUNT(*) FROM projects WHERE archived_at IS NULL")->fetchColumn() ?? 0;
     $stats['pending_projects'] = (int) ($stats['planning_projects'] ?? 0) + (int) ($stats['on_hold_projects'] ?? 0);
-    $stats['delayed_projects'] = $pdo->query("SELECT COUNT(*) FROM projects WHERE end_date < CURDATE() AND status IN ('planning', 'ongoing', 'on_hold')")->fetchColumn() ?? 0;
+    $stats['delayed_projects'] = $pdo->query("SELECT COUNT(*) FROM projects WHERE end_date IS NOT NULL AND end_date < CURDATE() AND status IN ('planning', 'ongoing', 'on_hold')")->fetchColumn() ?? 0;
     $stats['completed_purchases'] = 0;
     $stats['incoming_deliveries'] = (int) ($stats['pending_pos'] ?? 0);
     $stats['outgoing_requests'] = (int) ($items_needing_attention['pending_material_requests'] ?? 0);
@@ -203,7 +203,7 @@ try {
         $stats['contract_value'] = (float) ($stats['total_project_amount'] ?? 0);
     }
     try {
-        $stats['collected'] = $pdo->query("SELECT COALESCE(SUM(paid_amount), 0) FROM invoices")->fetchColumn() ?? 0;
+        $stats['collected'] = invoiceCollectedTotal($pdo);
     } catch (PDOException $e) {
         try {
             $stats['collected'] = $pdo->query("SELECT COALESCE(SUM(amount), 0) FROM invoices WHERE status = 'paid'")->fetchColumn() ?? 0;
@@ -217,18 +217,18 @@ try {
     $cost_trend_actual = [];
     try {
         $trend_rows = $pdo->query("
-            SELECT DATE_FORMAT(COALESCE(p.start_date, p.created_at), '%b') AS label,
-                   DATE_FORMAT(COALESCE(p.start_date, p.created_at), '%Y-%m') AS ym,
+            SELECT DATE_FORMAT(COALESCE(p.start_date, p.created_at), '%Y-%m') AS ym,
                    COALESCE(SUM(p.estimated_budget), 0) AS budget,
                    COALESCE(SUM(vpc.actual_cost), 0) AS actual
             FROM projects p
             LEFT JOIN v_project_costs vpc ON vpc.project_id = p.id
-            WHERE COALESCE(p.start_date, p.created_at) >= DATE_SUB(CURDATE(), INTERVAL 5 MONTH)
-            GROUP BY ym, label
+            WHERE p.archived_at IS NULL
+            GROUP BY ym
             ORDER BY ym
         ")->fetchAll();
         foreach ($trend_rows as $row) {
-            $cost_trend_labels[] = $row['label'];
+            $month = DateTime::createFromFormat('Y-m-d', $row['ym'] . '-01');
+            $cost_trend_labels[] = $month ? $month->format('M Y') : $row['ym'];
             $cost_trend_budget[] = (float) $row['budget'];
             $cost_trend_actual[] = (float) $row['actual'];
         }
@@ -248,7 +248,7 @@ try {
     try {
         $project_overview = $pdo->query("
             SELECT p.id, p.project_code, p.name, p.status, p.accounting_status, p.location, p.client, p.start_date, p.end_date,
-                   p.estimated_budget, vpc.actual_cost, vpc.pending_cost, p.progress,
+                   p.estimated_budget, vpc.actual_cost, vpc.pending_cost,
                    COALESCE(ua.full_name, ui.full_name) AS in_charge_name
             FROM projects p
             LEFT JOIN v_project_costs vpc ON vpc.project_id = p.id
@@ -281,7 +281,7 @@ try {
     $consolidated_reports = [
         'total_projects' => $pdo->query("SELECT COUNT(*) FROM projects")->fetchColumn() ?? 0,
         'total_budget' => $pdo->query("SELECT COALESCE(SUM(estimated_budget), 0) FROM projects")->fetchColumn() ?? 0,
-        'total_actual_cost' => $pdo->query("SELECT COALESCE(SUM(actual_cost), 0) FROM v_project_costs")->fetchColumn() ?? 0,
+        'total_actual_cost' => reportedActualCost((float) ($pdo->query("SELECT COALESCE(SUM(actual_cost), 0) FROM v_project_costs")->fetchColumn() ?? 0)),
         'total_invoices' => $pdo->query("SELECT COUNT(*) FROM invoices")->fetchColumn() ?? 0,
         'total_invoice_amount' => $pdo->query("SELECT COALESCE(SUM(amount), 0) FROM invoices")->fetchColumn() ?? 0,
         'total_expenses' => $pdo->query("SELECT COALESCE(SUM(amount), 0) FROM expenses")->fetchColumn() ?? 0,

@@ -1,6 +1,7 @@
 <?php
 require_once '../../config/database.php';
 require_once '../../includes/auth.php';
+require_once '../../includes/quotation_file.php';
 
 requireDepartment(['engineering']);
 
@@ -67,10 +68,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['receive_site_material
         if (!$request) {
             throw new RuntimeException('The request could not be found.');
         }
-        if ($request['status'] === 'completed') {
+        $linesReady = (int) $request['release_lines'] > 0 && (int) $request['released_lines'] === (int) $request['release_lines'];
+        if ($request['status'] === 'completed' && $linesReady) {
             throw new RuntimeException('This request is already completed.');
         }
-        if ((int) $request['release_lines'] < 1 || (int) $request['released_lines'] !== (int) $request['release_lines']) {
+        if (!$linesReady) {
             throw new RuntimeException('The Warehouse has not released every material to the site yet.');
         }
         $pdo->prepare("UPDATE purchase_requests SET status = 'completed' WHERE id = ? AND status <> 'completed'")->execute([$requestId]);
@@ -88,10 +90,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['receive_site_material
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['request_materials'])) {
     $projectId = (int) ($_POST['project_id'] ?? 0);
-    $picked = $_POST['pick'] ?? [];
-    $customName = trim($_POST['custom_name'] ?? '');
-    $customQty = (float) ($_POST['custom_qty'] ?? 0);
-    $customUnit = trim($_POST['custom_unit'] ?? '') ?: 'pcs';
     try {
         $project = $pdo->prepare("SELECT id, project_code, name FROM projects WHERE id = ?");
         $project->execute([$projectId]);
@@ -99,46 +97,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['request_materials']))
         if (!$project) {
             throw new RuntimeException('Select a received project.');
         }
-        $lines = [];
-        foreach ($picked as $row) {
-            $name = trim((string) ($row['name'] ?? ''));
-            $qty = (float) ($row['quantity'] ?? 0);
-            if ($name === '' || (string) ($row['selected'] ?? '0') !== '1' || $qty <= 0) {
-                continue;
-            }
-            $lines[] = [
-                'name' => $name,
-                'qty' => $qty,
-                'unit' => trim((string) ($row['unit'] ?? '')) ?: 'pcs',
-                'cost' => (float) ($row['cost'] ?? 0),
-            ];
+        if (function_exists('assertMonthOpen')) {
+            assertMonthOpen('procurement', date('Y-m-d'));
         }
-        if ($customName !== '' && $customQty > 0) {
-            $lines[] = ['name' => $customName, 'qty' => $customQty, 'unit' => $customUnit, 'cost' => 0];
-        }
-        if (!$lines) {
-            throw new RuntimeException('Select at least one material, then click Send to Procurement.');
-        }
+        $packed = projectExcelLinesForRequest(projectQuotationMaterials($pdo, $projectId));
+        $ready = $packed['lines'];
         $pdo->beginTransaction();
         $prNumber = generateNumber('PR', 'purchase_requests', 'pr_number');
         $purpose = 'Material request for ' . $project['project_code'] . ' - ' . $project['name'];
         $stmt = $pdo->prepare("INSERT INTO purchase_requests (pr_number, project_id, requestor_id, purpose, priority, status, created_by) VALUES (?, ?, ?, ?, 'medium', 'pending', ?)");
         $stmt->execute([$prNumber, $projectId, $_SESSION['user_id'], $purpose, $_SESSION['user_id']]);
         $requestId = (int) $pdo->lastInsertId();
-        $itemStmt = $pdo->prepare("INSERT INTO purchase_request_items (purchase_request_id, material_id, quantity, unit, estimated_cost, remarks) VALUES (?, ?, ?, ?, ?, ?)");
-        $total = 0.0;
-        foreach ($lines as $line) {
-            $materialId = engineeringMaterialId($line['name'], $line['unit'], $line['cost']);
-            $qty = max(1, (int) round($line['qty']));
-            $itemStmt->execute([$requestId, $materialId, $qty, $line['unit'], $line['cost'], $line['name']]);
-            $total += $qty * $line['cost'];
-        }
-        $pdo->prepare("UPDATE purchase_requests SET total_amount = ? WHERE id = ?")->execute([round($total, 2), $requestId]);
+        $total = saveProjectExcelRequestItems($pdo, $requestId, $ready);
+        $pdo->prepare("UPDATE purchase_requests SET total_amount = ? WHERE id = ?")->execute([$total, $requestId]);
         $pdo->prepare("UPDATE projects SET engineering_received_at = COALESCE(engineering_received_at, NOW()) WHERE id = ?")->execute([$projectId]);
         $pdo->commit();
         logActivity($_SESSION['user_id'], 'Requested materials', 'Projects', $prNumber . ' for ' . $project['project_code']);
         notify('procurement', 'material_request', 'Material request', $prNumber . ' has been sent to Procurement. They will buy the items, create the order and send it to the Warehouse.', 'modules/procurement/purchase_requests.php', $projectId, 'purchase_request', $requestId);
-        $_SESSION['success'] = $prNumber . ' has been sent to Procurement. They will buy the items, create the order and send it to the Warehouse.';
+        $skipped = $packed['missing'] ? ' Not sent yet because they are not in inventory: ' . implode(', ', $packed['missing']) . '.' : '';
+        $_SESSION['success'] = $prNumber . ' has been sent to Procurement. They will buy the items, create the order and send it to the Warehouse.' . $skipped;
     } catch (Throwable $e) {
         if ($pdo->inTransaction()) {
             $pdo->rollBack();
@@ -155,7 +132,7 @@ $selected = null;
 $engineer_requests = [];
 try {
     $projects = $pdo->query("
-        SELECT id, project_code, name, client, location, subject, status, engineering_received_at, created_at
+        SELECT id, project_code, name, client, location, subject, status, engineering_received_at, created_at, quotation_path, quotation_name
         FROM projects
         ORDER BY (engineering_received_at IS NULL) DESC, created_at DESC
     ")->fetchAll();
@@ -166,27 +143,7 @@ try {
                 break;
             }
         }
-        $stmt = $pdo->prepare("
-            SELECT item_name, description, quantity, unit, unit_price
-            FROM project_quotation_items
-            WHERE project_id = ?
-            UNION
-            SELECT i.item_name, i.description, i.quantity, i.unit, i.unit_price
-            FROM client_quotation_items i
-            INNER JOIN client_quotations q ON q.id = i.quotation_id
-            WHERE q.project_id = ?
-            ORDER BY item_name
-        ");
-        $stmt->execute([$projectId, $projectId]);
-        $seen = [];
-        foreach ($stmt->fetchAll() as $row) {
-            $key = strtolower(trim($row['item_name'] . '|' . $row['description']));
-            if (isset($seen[$key]) || preg_match('/\bvat\b/i', (string) $row['item_name'])) {
-                continue;
-            }
-            $seen[$key] = true;
-            $materials[] = $row;
-        }
+        $materials = projectQuotationMaterials($pdo, $projectId);
     }
     $requestSql = "
         SELECT pr.id, pr.pr_number, pr.status, pr.project_id,
@@ -218,7 +175,7 @@ include '../../includes/header.php';
 $awaitingComplete = 0;
 foreach ($engineer_requests as $request) {
     $readyRow = (int) $request['release_lines'] > 0 && (int) $request['released_lines'] === (int) $request['release_lines'];
-    if ($readyRow && $request['status'] !== 'completed') {
+    if ($readyRow && !($request['status'] === 'completed' && $readyRow)) {
         $awaitingComplete++;
     }
 }
@@ -238,7 +195,7 @@ foreach ($engineer_requests as $request) {
 <?php endif; ?>
 
 <?php if ($requestView): ?>
-<p style="color:#64748b;">Select the project and the materials, then click Send to Procurement. Once the items are ordered, received by the Warehouse and released to the site, the update will appear here. Click Completed to confirm.</p>
+<p style="color:#64748b;">The materials, quantity, and price come from the project Excel. They cannot be edited. Download the Excel to view the file. Once the items are ordered, received by the Warehouse and released to the site, the update will appear here. Click Completed to confirm.</p>
 <?php if ($awaitingComplete > 0): ?>
     <div class="alert alert-success">The Warehouse has released the materials to the site. Click Completed on the request.</div>
 <?php endif; ?>
@@ -256,10 +213,53 @@ foreach ($engineer_requests as $request) {
             </select>
         </div>
     </form>
-    <?php if ($selected): ?>
-        <p style="color:#64748b;margin:0.75rem 0 0;">The project's materials are already checked. Uncheck any item you do not want to include. The Send to Procurement button is below the list.</p>
-    <?php elseif (!$selected): ?>
-        <p style="color:#64748b;margin:0.75rem 0 0;">Choose a project to load its materials and send them to Procurement.</p>
+    <?php if (!$selected): ?>
+        <p class="help-text">Choose a project. Its materials and the Send to Procurement button appear here.</p>
+    <?php else: ?>
+        <?php $excelFile = projectQuotationAttachment($pdo, (int) $selected['id']); ?>
+        <p class="help-text">These lines are the project Excel. Material, quantity, and price cannot be edited.</p>
+        <p style="margin:0.5rem 0 1rem;">
+            <?php if ($excelFile): ?>
+                <a class="btn btn-outline" href="<?php echo htmlspecialchars(projectQuotationDownloadUrl((int) $selected['id'])); ?>"><i class="fas fa-file-excel"></i> Download Excel</a>
+            <?php else: ?>
+                <span class="text-muted">No Excel file is attached to this project.</span>
+            <?php endif; ?>
+        </p>
+        <form method="POST" id="sendProcurementForm">
+            <input type="hidden" name="requests" value="1">
+            <input type="hidden" name="request_materials" value="1">
+            <input type="hidden" name="project_id" value="<?php echo (int) $selected['id']; ?>">
+            <div class="table-responsive">
+                <table class="table">
+                    <thead>
+                        <tr><th>Material</th><th>Section</th><th>Qty</th><th>Unit</th><th>Price</th></tr>
+                    </thead>
+                    <tbody>
+                        <?php if (!$materials): ?>
+                            <tr><td colspan="5">This project has no Excel materials.</td></tr>
+                        <?php endif; ?>
+                        <?php $canSendAny = false; ?>
+                        <?php foreach ($materials as $item): ?>
+                        <?php $canSendLine = (int) ($item['material_id'] ?? 0) > 0; ?>
+                        <?php if ($canSendLine) { $canSendAny = true; } ?>
+                        <tr>
+                            <td>
+                                <?php echo htmlspecialchars(trim(($item['material_code'] ? $item['material_code'] . ' — ' : '') . $item['item_name'])); ?>
+                                <?php if (!$canSendLine): ?><div class="help-text">Not in inventory. Warehouse must add this material before it can be requested.</div><?php endif; ?>
+                            </td>
+                            <td><?php echo htmlspecialchars($item['description'] ?: '—'); ?></td>
+                            <td><?php echo number_format((float) $item['quantity'], 2); ?></td>
+                            <td><?php echo htmlspecialchars($item['unit'] ?: 'pcs'); ?></td>
+                            <td>₱<?php echo number_format((float) $item['unit_price'], 2); ?></td>
+                        </tr>
+                        <?php endforeach; ?>
+                    </tbody>
+                </table>
+            </div>
+            <div style="margin-top:1rem;">
+                <button type="submit" class="btn btn-primary" <?php echo empty($canSendAny) ? 'disabled' : ''; ?>><i class="fas fa-paper-plane"></i> Send to Procurement</button>
+            </div>
+        </form>
     <?php endif; ?>
 </div>
 <?php else: ?>
@@ -281,11 +281,12 @@ foreach ($engineer_requests as $request) {
                 <?php foreach ($engineer_requests as $request): ?>
                     <?php
                     $ready = (int) $request['release_lines'] > 0 && (int) $request['released_lines'] === (int) $request['release_lines'];
-                    if ($request['status'] === 'completed') {
+                    $finished = $request['status'] === 'completed' && $ready;
+                    if ($finished) {
                         $requestLabel = 'Completed';
                     } elseif ($ready) {
                         $requestLabel = 'Released';
-                    } elseif ($request['status'] === 'received') {
+                    } elseif ($request['status'] === 'received' || ($request['status'] === 'completed' && !$ready)) {
                         $requestLabel = 'Received by Warehouse';
                     } elseif (in_array($request['status'], ['ordered', 'confirmed', 'approved'], true)) {
                         $requestLabel = 'Ordered';
@@ -300,16 +301,19 @@ foreach ($engineer_requests as $request) {
                     <td><?php echo htmlspecialchars(trim(($request['project_code'] ?? '') . ' ' . ($request['project_name'] ?? ''))); ?></td>
                     <td><?php echo htmlspecialchars($request['location'] ?: '—'); ?></td>
                     <td><?php echo htmlspecialchars($request['engineer_name'] ?: '—'); ?></td>
-                    <td><span class="badge badge-<?php echo $request['status'] === 'completed' ? 'success' : htmlspecialchars($request['status']); ?>"><?php echo htmlspecialchars($requestLabel); ?></span></td>
+                    <td><span class="badge badge-<?php echo $finished ? 'success' : htmlspecialchars($request['status'] === 'completed' ? 'received' : $request['status']); ?>"><?php echo htmlspecialchars($requestLabel); ?></span></td>
                     <td>
-                        <?php if ($ready && $request['status'] !== 'completed' && canWriteDepartmentData('projects')): ?>
+                        <?php if (!empty($request['project_id'])): ?>
+                            <a class="btn btn-sm btn-outline" href="<?php echo htmlspecialchars(projectQuotationDownloadUrl((int) $request['project_id'])); ?>">Excel</a>
+                        <?php endif; ?>
+                        <?php if ($ready && !$finished && canWriteDepartmentData('projects')): ?>
                             <form method="POST" style="display:inline;" onsubmit="return confirm('Confirm that you received the materials on site? The request will be marked Completed.');">
                                 <?php if ($requestView): ?><input type="hidden" name="requests" value="1"><?php endif; ?>
                                 <input type="hidden" name="receive_site_materials" value="1">
                                 <input type="hidden" name="purchase_request_id" value="<?php echo (int) $request['id']; ?>">
                                 <button type="submit" class="btn btn-sm btn-success">Completed</button>
                             </form>
-                        <?php elseif ($request['status'] === 'completed'): ?>
+                        <?php elseif ($finished): ?>
                             <span class="text-muted">Completed</span>
                         <?php elseif ($request['status'] === 'pending'): ?>
                             <span class="text-muted">Sent to Procurement</span>
@@ -368,65 +372,6 @@ foreach ($engineer_requests as $request) {
             </tbody>
         </table>
     </div>
-</div>
-<?php endif; ?>
-
-<?php if ($selected && ($requestView || !$requestView)): ?>
-<div class="card" style="margin-top:1rem;">
-    <h3>Materials for <?php echo htmlspecialchars($selected['project_code'] . ' - ' . $selected['name']); ?></h3>
-    <form method="POST" id="sendProcurementForm">
-        <?php if ($requestView): ?><input type="hidden" name="requests" value="1"><?php endif; ?>
-        <input type="hidden" name="request_materials" value="1">
-        <input type="hidden" name="project_id" value="<?php echo (int) $selected['id']; ?>">
-        <div class="table-responsive">
-            <table class="table">
-                <thead>
-                    <tr><th></th><th>Item from quotation</th><th>Section</th><th>Qty</th><th>Unit</th></tr>
-                </thead>
-                <tbody>
-                    <?php if (!$materials): ?>
-                        <tr><td colspan="5">This project has no quotation materials yet. Type a material below.</td></tr>
-                    <?php endif; ?>
-                    <?php foreach ($materials as $index => $item): ?>
-                    <tr>
-                        <td>
-                            <input type="hidden" name="pick[<?php echo $index; ?>][selected]" value="0">
-                            <input type="checkbox" name="pick[<?php echo $index; ?>][selected]" value="1" checked>
-                        </td>
-                        <td>
-                            <?php echo htmlspecialchars($item['item_name']); ?>
-                            <input type="hidden" name="pick[<?php echo $index; ?>][name]" value="<?php echo htmlspecialchars($item['item_name']); ?>">
-                            <input type="hidden" name="pick[<?php echo $index; ?>][cost]" value="<?php echo htmlspecialchars($item['unit_price']); ?>">
-                        </td>
-                        <td><?php echo htmlspecialchars($item['description'] ?: '—'); ?></td>
-                        <td><input type="number" min="0.01" step="0.01" name="pick[<?php echo $index; ?>][quantity]" value="<?php echo htmlspecialchars($item['quantity']); ?>" style="width:90px;"></td>
-                        <td>
-                            <input type="text" name="pick[<?php echo $index; ?>][unit]" value="<?php echo htmlspecialchars($item['unit'] ?: 'pcs'); ?>" style="width:80px;">
-                        </td>
-                    </tr>
-                    <?php endforeach; ?>
-                </tbody>
-            </table>
-        </div>
-        <h4>Material not in the list</h4>
-        <div class="form-row">
-            <div class="form-group">
-                <label>Material name</label>
-                <input type="text" name="custom_name" placeholder="Type a material name">
-            </div>
-            <div class="form-group">
-                <label>Qty</label>
-                <input type="number" name="custom_qty" min="0" step="0.01" value="0">
-            </div>
-            <div class="form-group">
-                <label>Unit</label>
-                <input type="text" name="custom_unit" value="pcs">
-            </div>
-        </div>
-        <div style="margin-top:1rem;">
-            <button type="submit" class="btn btn-primary"><i class="fas fa-paper-plane"></i> Send to Procurement</button>
-        </div>
-    </form>
 </div>
 <?php endif; ?>
 

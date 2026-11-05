@@ -31,7 +31,7 @@ try {
     $stats['ongoing_projects'] = $pdo->query("SELECT COUNT(*) FROM projects WHERE status = 'ongoing'")->fetchColumn() ?? 0;
     $stats['completed_projects'] = $pdo->query("SELECT COUNT(*) FROM projects WHERE status = 'completed'")->fetchColumn() ?? 0;
     $stats['total_budget'] = $pdo->query("SELECT COALESCE(SUM(estimated_budget), 0) FROM projects")->fetchColumn() ?? 0;
-    $stats['actual_cost'] = $pdo->query("SELECT COALESCE(SUM(actual_cost), 0) FROM v_project_costs")->fetchColumn() ?? 0;
+    $stats['actual_cost'] = reportedActualCost((float) ($pdo->query("SELECT COALESCE(SUM(actual_cost), 0) FROM v_project_costs")->fetchColumn() ?? 0));
     $stats['pending_cost'] = $pdo->query("SELECT COALESCE(SUM(pending_cost), 0) FROM v_project_costs")->fetchColumn() ?? 0;
 
     try {
@@ -65,9 +65,9 @@ try {
         $stats['material_requirements'] = $requestStmt->fetchColumn() ?? 0;
     }
     if (isAdmin()) {
-        $recent_projects = $pdo->query("SELECT id, project_code, name, status, location, start_date, end_date, in_charge_id FROM projects ORDER BY created_at DESC LIMIT 8")->fetchAll();
+        $recent_projects = $pdo->query("SELECT id, project_code, name, status, location, start_date, end_date, completion_date, in_charge_id FROM projects ORDER BY created_at DESC LIMIT 8")->fetchAll();
     } else {
-        $stmt = $pdo->prepare("SELECT id, project_code, name, status, location, start_date, end_date, in_charge_id FROM projects WHERE in_charge_id = ? OR in_charge_id IS NULL ORDER BY (in_charge_id = ?) DESC, created_at DESC LIMIT 8");
+        $stmt = $pdo->prepare("SELECT id, project_code, name, status, location, start_date, end_date, completion_date, in_charge_id FROM projects WHERE in_charge_id = ? OR in_charge_id IS NULL ORDER BY (in_charge_id = ?) DESC, created_at DESC LIMIT 8");
         $stmt->execute([$_SESSION['user_id'], $_SESSION['user_id']]);
         $recent_projects = $stmt->fetchAll();
     }
@@ -112,8 +112,8 @@ include '../../includes/header.php';
     <div class="dept-kpis">
         <a class="dept-kpi blue" href="received_projects.php"><div class="ico"><i class="fas fa-inbox"></i></div><div><div class="num"><?php echo number_format($stats['assigned_projects']); ?></div><div class="lbl">Received Projects</div></div></a>
         <a class="dept-kpi sky" href="accomplishments.php"><div class="ico"><i class="fas fa-clipboard-check"></i></div><div><div class="num"><?php echo number_format((float) $stats['project_progress'], 0); ?>%</div><div class="lbl">Project Progress</div></div></a>
-        <a class="dept-kpi orange" href="received_projects.php?view=requests"><div class="ico"><i class="fas fa-paper-plane"></i></div><div><div class="num"><?php echo number_format($stats['material_requirements']); ?></div><div class="lbl">Material Requests</div></div></a>
-        <a class="dept-kpi green" href="received_projects.php?view=requests"><div class="ico"><i class="fas fa-boxes"></i></div><div><div class="num"><?php echo number_format($stats['materials_received']); ?></div><div class="lbl">Materials Received</div></div></a>
+        <a class="dept-kpi orange" href="received_projects.php?requests=1"><div class="ico"><i class="fas fa-paper-plane"></i></div><div><div class="num"><?php echo number_format($stats['material_requirements']); ?></div><div class="lbl">Material Requests</div></div></a>
+        <a class="dept-kpi green" href="received_projects.php?requests=1"><div class="ico"><i class="fas fa-boxes"></i></div><div><div class="num"><?php echo number_format($stats['materials_received']); ?></div><div class="lbl">Materials Received</div></div></a>
         <a class="dept-kpi purple" href="project_details.php"><div class="ico"><i class="fas fa-hard-hat"></i></div><div><div class="num"><?php echo number_format($stats['ongoing_projects']); ?> / <?php echo number_format($stats['completed_projects']); ?></div><div class="lbl">Ongoing & Completed Projects</div></div></a>
     </div>
 
@@ -158,7 +158,7 @@ include '../../includes/header.php';
                             <td><?php echo htmlspecialchars($project['name']); ?></td>
                             <td><?php echo htmlspecialchars($project['location'] ?? 'N/A'); ?></td>
                             <td><span class="dept-badge <?php echo htmlspecialchars($project['status']); ?>"><?php echo ucfirst(str_replace('_', ' ', $project['status'])); ?></span></td>
-                            <td><?php echo formatDisplayDate($project['end_date'] ?? null); ?></td>
+                            <td><?php echo projectScheduleLabel($project['end_date'] ?? null, $project['completion_date'] ?? null, (string) ($project['status'] ?? '')); ?></td>
                         </tr>
                     <?php endforeach; ?>
                     </tbody>

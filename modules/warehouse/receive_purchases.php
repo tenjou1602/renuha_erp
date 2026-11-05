@@ -43,6 +43,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['receive_po'])) {
     }
     $po_id = (int)($_POST['po_id'] ?? 0);
     try {
+        $checkedBy = warehouseCheckedByName($_POST['checked_by'] ?? '');
+        ensureWarehouseCheckerColumns($pdo);
+        assertMonthOpen('warehouse', date('Y-m-d'));
         $stmt = $pdo->prepare("SELECT * FROM purchase_orders WHERE id = ? AND status = 'ready_for_warehouse' AND received_at IS NULL");
         $stmt->execute([$po_id]);
         $po = $stmt->fetch();
@@ -60,17 +63,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['receive_po'])) {
                     if ($qty <= 0) {
                         continue;
                     }
-                    warehouseReceiveBatch($pdo, (int)$item['material_id'], $qty, (int)$_SESSION['user_id'], 'Received PO ' . $po['po_number']);
+                    warehouseReceiveBatch($pdo, (int)$item['material_id'], $qty, (int)$_SESSION['user_id'], 'Received PO ' . $po['po_number'] . '. Received by ' . $checkedBy . '.');
                     try {
                         $markItem->execute([(int)$po['id'], (int)$item['material_id']]);
                     } catch (PDOException $e) {
                     }
                 }
-                $pdo->prepare("UPDATE purchase_orders SET status = 'delivered', received_at = NOW() WHERE id = ? AND status <> 'delivered'")->execute([$po_id]);
+                $pdo->prepare("UPDATE purchase_orders SET status = 'delivered', received_at = NOW(), received_by_name = ? WHERE id = ? AND status <> 'delivered'")->execute([$checkedBy, $po_id]);
                 if (!empty($po['purchase_request_id'])) {
-                    $pdo->prepare("UPDATE purchase_requests SET status = 'completed' WHERE id = ?")->execute([$po['purchase_request_id']]);
+                    $pdo->prepare("UPDATE purchase_requests SET status = 'received' WHERE id = ? AND status <> 'completed'")->execute([$po['purchase_request_id']]);
+                    $pdo->prepare("UPDATE material_requests SET flow_status = 'warehouse' WHERE purchase_request_id = ? AND status = 'pending' AND flow_status IN ('procurement', 'accounting')")->execute([$po['purchase_request_id']]);
                 }
-                notify('procurement', 'po_delivered', 'Purchase order delivered', $po['po_number'] . ' was received by Warehouse and is now completed.', 'modules/procurement/purchase_orders.php', null, 'purchase_order', $po_id);
+                notify('procurement', 'po_delivered', 'Purchase order delivered', $po['po_number'] . ' was received by Warehouse. Release it to the project site so Engineering can confirm receipt.', 'modules/procurement/purchase_orders.php', null, 'purchase_order', $po_id);
                 notify('accounting', 'po_delivered', 'Purchase order delivered', $po['po_number'] . ' was received by Warehouse. Record the supplier payment when the invoice is ready.', 'modules/accounting/expenses.php', null, 'purchase_order', $po_id);
                 $pdo->commit();
                 try {
@@ -79,8 +83,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['receive_po'])) {
                 } catch (Throwable $syncError) {
                     error_log('[Runeha ERP] sync received orders for release: ' . $syncError->getMessage());
                 }
-                logActivity($_SESSION['user_id'], 'Received purchase order', 'Warehouse', 'PO: ' . $po['po_number']);
-                $_SESSION['success'] = 'Purchase order ' . $po['po_number'] . ' received and stock updated.';
+                logActivity($_SESSION['user_id'], 'Received purchase order', 'Warehouse', 'PO: ' . $po['po_number'] . ' Received by ' . $checkedBy);
+                $_SESSION['success'] = 'Purchase order ' . $po['po_number'] . ' received and stock updated. Received by ' . $checkedBy . '.';
             }
         }
     } catch (Throwable $e) {
@@ -185,11 +189,15 @@ include '../../includes/header.php';
                         <td><?php
                             $whLabel = $order['status'] === 'delivered' ? 'Delivered' : 'For receiving';
                             echo '<span class="badge badge-' . ($whLabel === 'Delivered' ? 'success' : 'warning') . '">' . $whLabel . '</span>';
+                            if (!empty($order['received_by_name'])) {
+                                echo '<div style="color:#64748b;font-size:0.8rem;">Received by ' . htmlspecialchars($order['received_by_name']) . '</div>';
+                            }
                         ?></td>
                         <td>
                             <?php if ($order['status'] === 'ready_for_warehouse' && canWriteDepartmentData('warehouse')): ?>
-                            <form method="POST" style="display:inline;" onsubmit="return confirm('Receive this PO and add quantities to stock?');">
+                            <form method="POST" style="display:inline;" onsubmit="return askCheckedBy(this, 'Receive by — who checked this item?');">
                                 <input type="hidden" name="po_id" value="<?php echo (int)$order['id']; ?>">
+                                <input type="hidden" name="checked_by" value="">
                                 <button type="submit" name="receive_po" class="btn btn-sm btn-primary">Receive Materials</button>
                             </form>
                             <?php else: ?>
@@ -204,10 +212,25 @@ include '../../includes/header.php';
         </table>
     </div>
 </div>
-<?php if ((int) ($_GET['po'] ?? 0) > 0): ?>
 <script>
-document.getElementById('po-<?php echo (int) $_GET['po']; ?>')?.scrollIntoView({behavior:'smooth', block:'center'});
+function askCheckedBy(form, label) {
+    const entered = window.prompt(label);
+    if (entered === null) {
+        return false;
+    }
+    const name = entered.trim();
+    if (!name) {
+        window.alert('Enter the employee who checked the item.');
+        return false;
+    }
+    const field = form.querySelector('input[name="checked_by"]');
+    if (!field) {
+        return false;
+    }
+    field.value = name;
+    return true;
+}
+document.getElementById('po-<?php echo (int) ($_GET['po'] ?? 0); ?>')?.scrollIntoView({behavior:'smooth', block:'center'});
 </script>
-<?php endif; ?>
 
 <?php include '../../includes/footer.php'; ?>

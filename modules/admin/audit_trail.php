@@ -114,7 +114,7 @@ include '../../includes/header.php';
                 <?php else: ?>
                     <?php foreach ($logs as $log): ?>
                     <tr>
-                        <td><?php echo date('M d, Y h:i A', strtotime($log['created_at'])); ?></td>
+                        <td class="audit-when"><?php echo date('M d, Y', strtotime($log['created_at'])); ?><div><?php echo date('h:i A', strtotime($log['created_at'])); ?></div></td>
                         <td>
                             <?php echo htmlspecialchars($log['full_name'] ?: 'System'); ?>
                             <?php if (!empty($log['department'])): ?>

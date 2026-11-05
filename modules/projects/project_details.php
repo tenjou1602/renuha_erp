@@ -1,6 +1,7 @@
 <?php
 require_once '../../config/database.php';
 require_once '../../includes/auth.php';
+require_once '../../includes/fund_requests.php';
 
 requireDepartment(['engineering']);
 
@@ -62,13 +63,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['set_project_stage']))
     $stage = $_POST['progress_status'] ?? '';
     $allowed = ['planning', 'ongoing', 'on_hold', 'completed'];
     $completionBlock = $stage === 'completed' ? projectCompletionBlocker($pdo, $pid) : null;
+    $picStmt = $pdo->prepare("SELECT COALESCE(in_charge_id, assigned_to) FROM projects WHERE id = ?");
+    $picStmt->execute([$pid]);
+    $stageBlock = projectStageBlocker($pdo, $stage, $picStmt->fetchColumn(), $pid);
     if ($pid <= 0 || !in_array($stage, $allowed, true)) {
         $_SESSION['error'] = 'Choose Planning, Ongoing, On Hold, or Completed.';
+    } elseif ($stageBlock) {
+        $_SESSION['error'] = $stageBlock;
     } elseif ($completionBlock) {
         $_SESSION['error'] = $completionBlock;
     } else {
         try {
-            $pdo->prepare("UPDATE projects SET status = ? WHERE id = ?")->execute([$stage, $pid]);
+            applyProjectStatus($pdo, $pid, $stage);
             $_SESSION['success'] = 'Project status updated.';
         } catch (PDOException $e) {
             $_SESSION['error'] = userDatabaseError($e, 'Projects');
@@ -285,9 +291,6 @@ include '../../includes/header.php';
 <div class="page-header">
     <h1><i class="fas fa-hard-hat"></i> <?php echo $view === 'implementation' ? 'Project Implementation' : 'Project Details'; ?></h1>
     <div class="button-row">
-        <?php if (canWriteDepartmentData('projects')): ?>
-        <a href="projects.php?action=edit&id=<?php echo $project['id']; ?>" class="btn btn-warning"><i class="fas fa-edit"></i> Edit</a>
-        <?php endif; ?>
         <a href="project_pdf.php?id=<?php echo (int)$project['id']; ?>" class="btn btn-outline"><i class="fas fa-download"></i> Download PDF</a>
         <a href="project_details.php" class="btn btn-secondary"><i class="fas fa-arrow-left"></i> All Details</a>
         <a href="received_projects.php?id=<?php echo (int) $project['id']; ?>" class="btn btn-secondary"><i class="fas fa-inbox"></i> Received</a>
@@ -335,6 +338,20 @@ include '../../includes/header.php';
             <div class="value"><?php echo formatDisplayDate($project['end_date'] ?? null); ?></div>
         </div>
         <div class="detail-item">
+            <div class="label">Completion Date</div>
+            <div class="value"><?php echo formatDisplayDate($project['completion_date'] ?? null); ?></div>
+        </div>
+        <?php
+        $fundHistory = [];
+        try {
+            $historyStmt = $pdo->prepare("SELECT fr.request_number, fr.amount, fr.status, fr.requested_at, fr.decided_at, u.full_name FROM fund_requests fr LEFT JOIN users u ON u.id = fr.requested_by WHERE fr.project_id = ? ORDER BY fr.id DESC");
+            $historyStmt->execute([(int) $project['id']]);
+            $fundHistory = $historyStmt->fetchAll();
+        } catch (Throwable $e) {
+            $fundHistory = [];
+        }
+        ?>
+        <div class="detail-item">
             <div class="label">Estimated Budget</div>
             <div class="value" style="color:#4e73df;">₱<?php echo number_format($project['estimated_budget'], 2); ?></div>
         </div>
@@ -352,6 +369,30 @@ include '../../includes/header.php';
                 ₱<?php echo number_format(($project['estimated_budget'] - ($project['actual_cost'] ?? 0)), 2); ?>
             </div>
         </div>
+    </div>
+    <div style="margin-top:1rem;">
+        <h3>Fund request history</h3>
+        <?php if (empty($fundHistory)): ?>
+            <p>No fund requests for this project.</p>
+        <?php else: ?>
+            <table class="table">
+                <thead><tr><th>Request</th><th>Who</th><th>When</th><th>Amount</th><th>Status</th></tr></thead>
+                <tbody>
+                <?php foreach ($fundHistory as $fundRow): ?>
+                    <tr>
+                        <td><?php echo htmlspecialchars($fundRow['request_number']); ?></td>
+                        <td><?php echo htmlspecialchars($fundRow['full_name'] ?? 'Unknown'); ?></td>
+                        <td><?php echo date('M d, Y h:i A', strtotime($fundRow['requested_at'])); ?></td>
+                        <td>₱<?php echo number_format((float) $fundRow['amount'], 2); ?></td>
+                        <td><?php echo htmlspecialchars(ucfirst($fundRow['status'])); ?></td>
+                    </tr>
+                <?php endforeach; ?>
+                </tbody>
+            </table>
+        <?php endif; ?>
+        <?php if (($project['status'] ?? '') === 'completed'): ?>
+            <p>This project is completed. Funds can no longer be requested.</p>
+        <?php endif; ?>
     </div>
     <?php if ($project['description']): ?>
         <div style="margin-top:1rem;padding-top:1rem;border-top:1px solid #e2e8f0;">

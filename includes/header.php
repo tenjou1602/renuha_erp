@@ -45,6 +45,9 @@ $page_title = $page_title ?? 'RUNEHA INC. ERP';
     ?>
     
     <div class="main-content">
+        <?php if (function_exists('isViewingAsAdmin') && isViewingAsAdmin()): ?>
+        <div class="admin-view-banner" role="status">Admin mode: <?php echo htmlspecialchars(adminModeLabel()); ?></div>
+        <?php endif; ?>
         <?php if (function_exists('isLoggedIn') && isLoggedIn()): ?>
         <?php if (function_exists('scanOperationalAlerts')) { scanOperationalAlerts(); } ?>
         <div class="topbar">
